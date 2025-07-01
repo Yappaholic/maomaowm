@@ -1,5 +1,5 @@
 project('maomao', ['c', 'cpp'],
-  version : '0.5.8'  # 这个版本号将被 Git tag 覆盖
+  version : '0.7.1'  # 这个版本号将被 Git tag 覆盖
 )
 
 subdir('protocols')
@@ -38,6 +38,8 @@ xkbcommon_dep = dependency('xkbcommon')
 libinput_dep = dependency('libinput')
 libwayland_client_dep = dependency('wayland-client')
 pcre2_dep = dependency('libpcre2-8')
+libscenefx_dep = dependency('scenefx-0.4',version: '>=0.4.1')
+
 
 # 获取 Git Commit Hash 和最新的 tag
 git = find_program('git', required : false)
@@ -74,6 +76,7 @@ executable('maomao',
     libm,
     xcb,
     xlibs,
+    libscenefx_dep,
     wayland_server_dep,
     wlroots_dep,
     xkbcommon_dep,

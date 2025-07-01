@@ -60,6 +60,8 @@ typedef struct {
 	int noswallow;
 	int scratchpad_width;
 	int scratchpad_height;
+	float focused_opacity;
+	float unfocused_opacity;
 	uint32_t passmod;
 	xkb_keysym_t keysym;
 	KeyBinding globalkeybinding;
@@ -117,11 +119,19 @@ typedef struct {
 typedef struct {
 	int id;			   // 标签ID (1-9)
 	char *layout_name; // 布局名称
+	char *monitor_name;
 	int no_render_border;
 } ConfigTagRule;
 
 typedef struct {
+	char *layer_name; // 布局名称
+	int noblur;
+	int noanim;
+} ConfigLayerRule;
+
+typedef struct {
 	int animations;
+	int layer_animations;
 	char animation_type_open[10];
 	char animation_type_close[10];
 	int animation_fade_in;
@@ -147,10 +157,13 @@ typedef struct {
 	int focus_cross_monitor;
 	int focus_cross_tag;
 	int no_border_when_single;
+	int no_radius_when_single;
 	int snap_distance;
 	int enable_floating_snap;
 	int drag_tile_to_tile;
 	unsigned int swipe_min_threshold;
+	float focused_opacity;
+	float unfocused_opacity;
 	float *scroller_proportion_preset;
 	int scroller_proportion_preset_count;
 
@@ -192,6 +205,18 @@ typedef struct {
 	unsigned int accel_profile;
 	double accel_speed;
 
+	int blur;
+	int blur_layer;
+	int blur_optimized;
+	int border_radius;
+	struct blur_data blur_params;
+	int shadows;
+	unsigned int shadows_size;
+	float shadows_blur;
+	int shadows_position_x;
+	int shadows_position_y;
+	float shadowscolor[4];
+
 	int smartgaps;
 	unsigned int gappih;
 	unsigned int gappiv;
@@ -211,6 +236,9 @@ typedef struct {
 
 	ConfigTagRule *tag_rules; // 动态数组
 	int tag_rules_count;	  // 数量
+
+	ConfigLayerRule *layer_rules; // 动态数组
+	int layer_rules_count;		  // 数量
 
 	ConfigWinRule *window_rules;
 	int window_rules_count;
@@ -504,6 +532,10 @@ uint32_t parse_mod(const char *mod_str) {
 			if (strstr(token, "alt") || strstr(token, "alt_l") ||
 				strstr(token, "alt_r")) {
 				mod |= WLR_MODIFIER_ALT;
+			}
+			if (strstr(token, "hyper") || strstr(token, "hyper_l") ||
+				strstr(token, "hyper_r")) {
+				mod |= WLR_MODIFIER_MOD3;
 			}
 		}
 
@@ -806,6 +838,8 @@ void parse_config_line(Config *config, const char *line) {
 
 	if (strcmp(key, "animations") == 0) {
 		config->animations = atoi(value);
+	} else if (strcmp(key, "layer_animations") == 0) {
+		config->layer_animations = atoi(value);
 	} else if (strcmp(key, "animation_type_open") == 0) {
 		snprintf(config->animation_type_open,
 				 sizeof(config->animation_type_open), "%.9s",
@@ -873,6 +907,38 @@ void parse_config_line(Config *config, const char *line) {
 		config->focus_cross_monitor = atoi(value);
 	} else if (strcmp(key, "focus_cross_tag") == 0) {
 		config->focus_cross_tag = atoi(value);
+	} else if (strcmp(key, "focus_cross_tag") == 0) {
+		config->focus_cross_tag = atoi(value);
+	} else if (strcmp(key, "blur") == 0) {
+		config->blur = atoi(value);
+	} else if (strcmp(key, "blur_layer") == 0) {
+		config->blur_layer = atoi(value);
+	} else if (strcmp(key, "blur_optimized") == 0) {
+		config->blur_optimized = atoi(value);
+	} else if (strcmp(key, "border_radius") == 0) {
+		config->border_radius = atoi(value);
+	} else if (strcmp(key, "blur_params_num_passes") == 0) {
+		config->blur_params.num_passes = atoi(value);
+	} else if (strcmp(key, "blur_params_radius") == 0) {
+		config->blur_params.radius = atoi(value);
+	} else if (strcmp(key, "blur_params_noise") == 0) {
+		config->blur_params.noise = atof(value);
+	} else if (strcmp(key, "blur_params_brightness") == 0) {
+		config->blur_params.brightness = atof(value);
+	} else if (strcmp(key, "blur_params_contrast") == 0) {
+		config->blur_params.contrast = atof(value);
+	} else if (strcmp(key, "blur_params_saturation") == 0) {
+		config->blur_params.saturation = atof(value);
+	} else if (strcmp(key, "shadows") == 0) {
+		config->shadows = atoi(value);
+	} else if (strcmp(key, "shadows_size") == 0) {
+		config->shadows_size = atoi(value);
+	} else if (strcmp(key, "shadows_blur") == 0) {
+		config->shadows_blur = atof(value);
+	} else if (strcmp(key, "shadows_position_x") == 0) {
+		config->shadows_position_x = atoi(value);
+	} else if (strcmp(key, "shadows_position_y") == 0) {
+		config->shadows_position_y = atoi(value);
 	} else if (strcmp(key, "single_scratchpad") == 0) {
 		config->single_scratchpad = atoi(value);
 	} else if (strcmp(key, "xwayland_persistence") == 0) {
@@ -881,6 +947,8 @@ void parse_config_line(Config *config, const char *line) {
 		config->syncobj_enable = atoi(value);
 	} else if (strcmp(key, "no_border_when_single") == 0) {
 		config->no_border_when_single = atoi(value);
+	} else if (strcmp(key, "no_radius_when_single") == 0) {
+		config->no_radius_when_single = atoi(value);
 	} else if (strcmp(key, "snap_distance") == 0) {
 		config->snap_distance = atoi(value);
 	} else if (strcmp(key, "enable_floating_snap") == 0) {
@@ -889,6 +957,10 @@ void parse_config_line(Config *config, const char *line) {
 		config->drag_tile_to_tile = atoi(value);
 	} else if (strcmp(key, "swipe_min_threshold") == 0) {
 		config->swipe_min_threshold = atoi(value);
+	} else if (strcmp(key, "focused_opacity") == 0) {
+		config->focused_opacity = atof(value);
+	} else if (strcmp(key, "unfocused_opacity") == 0) {
+		config->unfocused_opacity = atof(value);
 	} else if (strcmp(key, "xkb_rules_rules") == 0) {
 		strncpy(xkb_rules_rules, value, sizeof(xkb_rules_rules) - 1);
 		xkb_rules_rules[sizeof(xkb_rules_rules) - 1] =
@@ -1109,6 +1181,14 @@ void parse_config_line(Config *config, const char *line) {
 		} else {
 			convert_hex_to_rgba(config->rootcolor, color);
 		}
+
+	} else if (strcmp(key, "shadowscolor") == 0) {
+		long int color = parse_color(value);
+		if (color == -1) {
+			fprintf(stderr, "Error: Invalid shadowscolor format: %s\n", value);
+		} else {
+			convert_hex_to_rgba(config->shadowscolor, color);
+		}
 	} else if (strcmp(key, "bordercolor") == 0) {
 		long int color = parse_color(value);
 		if (color == -1) {
@@ -1183,6 +1263,7 @@ void parse_config_line(Config *config, const char *line) {
 		// 设置默认值
 		rule->id = 0;
 		rule->layout_name = NULL;
+		rule->monitor_name = NULL;
 
 		char *token = strtok(value, ",");
 		while (token != NULL) {
@@ -1199,6 +1280,8 @@ void parse_config_line(Config *config, const char *line) {
 					rule->id = CLAMP_INT(atoi(val), 1, LENGTH(tags));
 				} else if (strcmp(key, "layout_name") == 0) {
 					rule->layout_name = strdup(val);
+				} else if (strcmp(key, "monitor_name") == 0) {
+					rule->monitor_name = strdup(val);
 				} else if (strcmp(key, "no_render_border") == 0) {
 					rule->no_render_border = CLAMP_INT(atoi(val), 0, 1);
 				}
@@ -1207,6 +1290,52 @@ void parse_config_line(Config *config, const char *line) {
 		}
 
 		config->tag_rules_count++;
+	} else if (strcmp(key, "layerrule") == 0) {
+		config->layer_rules =
+			realloc(config->layer_rules,
+					(config->layer_rules_count + 1) * sizeof(ConfigLayerRule));
+		if (!config->layer_rules) {
+			fprintf(stderr,
+					"Error: Failed to allocate memory for layer rules\n");
+			return;
+		}
+
+		ConfigLayerRule *rule = &config->layer_rules[config->layer_rules_count];
+		memset(rule, 0, sizeof(ConfigLayerRule));
+
+		// 设置默认值
+		rule->layer_name = NULL;
+		rule->noblur = 0;
+		rule->noanim = 0;
+
+		char *token = strtok(value, ",");
+		while (token != NULL) {
+			char *colon = strchr(token, ':');
+			if (colon != NULL) {
+				*colon = '\0';
+				char *key = token;
+				char *val = colon + 1;
+
+				trim_whitespace(key);
+				trim_whitespace(val);
+
+				if (strcmp(key, "layer_name") == 0) {
+					rule->layer_name = strdup(val);
+				} else if (strcmp(key, "noblur") == 0) {
+					rule->noblur = CLAMP_INT(atoi(val), 0, 1);
+				} else if (strcmp(key, "noanim") == 0) {
+					rule->noanim = CLAMP_INT(atoi(val), 0, 1);
+				}
+			}
+			token = strtok(NULL, ",");
+		}
+
+		// 如果没有指定布局名称，则使用默认值
+		if (rule->layer_name == NULL) {
+			rule->layer_name = strdup("default");
+		}
+
+		config->layer_rules_count++;
 	} else if (strcmp(key, "windowrule") == 0) {
 		config->window_rules =
 			realloc(config->window_rules,
@@ -1238,6 +1367,8 @@ void parse_config_line(Config *config, const char *line) {
 		rule->no_force_center = -1;
 		rule->scratchpad_width = 0;
 		rule->scratchpad_height = 0;
+		rule->focused_opacity = 0;
+		rule->unfocused_opacity = 0;
 		rule->width = 0;
 		rule->height = 0;
 		rule->animation_type_open = NULL;
@@ -1301,6 +1432,10 @@ void parse_config_line(Config *config, const char *line) {
 					rule->isunglobal = atoi(val);
 				} else if (strcmp(key, "isglobal") == 0) {
 					rule->isglobal = atoi(val);
+				} else if (strcmp(key, "unfocused_opacity") == 0) {
+					rule->unfocused_opacity = atof(val);
+				} else if (strcmp(key, "focused_opacity") == 0) {
+					rule->focused_opacity = atof(val);
 				} else if (strcmp(key, "isoverlay") == 0) {
 					rule->isoverlay = atoi(val);
 				} else if (strcmp(key, "isterm") == 0) {
@@ -1874,11 +2009,24 @@ void free_config(void) {
 	// 释放 tag_rules
 	if (config.tag_rules) {
 		for (int i = 0; i < config.tag_rules_count; i++) {
-			free((void *)config.tag_rules[i].layout_name);
+			if (config.tag_rules[i].layout_name)
+				free((void *)config.tag_rules[i].layout_name);
+			if (config.tag_rules[i].monitor_name)
+				free((void *)config.tag_rules[i].monitor_name);
 		}
 		free(config.tag_rules);
 		config.tag_rules = NULL;
 		config.tag_rules_count = 0;
+	}
+
+	// 释放 layer_rules
+	if (config.layer_rules) {
+		for (int i = 0; i < config.layer_rules_count; i++) {
+			free((void *)config.layer_rules[i].layer_name);
+		}
+		free(config.layer_rules);
+		config.layer_rules = NULL;
+		config.layer_rules_count = 0;
 	}
 
 	// 释放 exec
@@ -1923,6 +2071,7 @@ void free_config(void) {
 void override_config(void) {
 	// 动画启用
 	animations = CLAMP_INT(config.animations, 0, 1);
+	layer_animations = CLAMP_INT(config.layer_animations, 0, 1);
 
 	// 标签动画方向
 	tag_animation_direction = CLAMP_INT(config.tag_animation_direction, 0, 1);
@@ -1986,6 +2135,7 @@ void override_config(void) {
 	snap_distance = CLAMP_INT(config.snap_distance, 0, 99999);
 	cursor_size = CLAMP_INT(config.cursor_size, 4, 512);
 	no_border_when_single = CLAMP_INT(config.no_border_when_single, 0, 1);
+	no_radius_when_single = CLAMP_INT(config.no_radius_when_single, 0, 1);
 	cursor_hide_timeout =
 		CLAMP_INT(config.cursor_hide_timeout, 0, 36000); // 0-10小时
 	drag_tile_to_tile = CLAMP_INT(config.drag_tile_to_tile, 0, 1);
@@ -2020,6 +2170,25 @@ void override_config(void) {
 	borderpx = CLAMP_INT(config.borderpx, 0, 200);
 	smartgaps = CLAMP_INT(config.smartgaps, 0, 1);
 
+	blur = CLAMP_INT(config.blur, 0, 1);
+	blur_layer = CLAMP_INT(config.blur_layer, 0, 1);
+	blur_optimized = CLAMP_INT(config.blur_optimized, 0, 1);
+	border_radius = CLAMP_INT(config.border_radius, 0, 100);
+	blur_params.num_passes = CLAMP_INT(config.blur_params.num_passes, 0, 10);
+	blur_params.radius = CLAMP_INT(config.blur_params.radius, 0, 100);
+	blur_params.noise = CLAMP_FLOAT(config.blur_params.noise, 0, 1);
+	blur_params.brightness = CLAMP_FLOAT(config.blur_params.brightness, 0, 1);
+	blur_params.contrast = CLAMP_FLOAT(config.blur_params.contrast, 0, 1);
+	blur_params.saturation = CLAMP_FLOAT(config.blur_params.saturation, 0, 1);
+	shadows = CLAMP_INT(config.shadows, 0, 1);
+	shadows_size = CLAMP_INT(config.shadows_size, 0, 100);
+	shadows_blur = CLAMP_INT(config.shadows_blur, 0, 100);
+	shadows_position_x = CLAMP_INT(config.shadows_position_x, -1000, 1000);
+	shadows_position_y = CLAMP_INT(config.shadows_position_y, -1000, 1000);
+	focused_opacity = CLAMP_FLOAT(config.focused_opacity, 0.0f, 1.0f);
+	unfocused_opacity = CLAMP_FLOAT(config.unfocused_opacity, 0.0f, 1.0f);
+	memcpy(shadowscolor, config.shadowscolor, sizeof(shadowscolor));
+
 	// 复制颜色数组
 	memcpy(rootcolor, config.rootcolor, sizeof(rootcolor));
 	memcpy(bordercolor, config.bordercolor, sizeof(bordercolor));
@@ -2045,6 +2214,7 @@ void override_config(void) {
 void set_value_default() {
 	/* animaion */
 	config.animations = animations;					// 是否启用动画
+	config.layer_animations = layer_animations;		// 是否启用layer动画
 	config.animation_fade_in = animation_fade_in;	// Enable animation fade in
 	config.animation_fade_out = animation_fade_out; // Enable animation fade out
 	config.tag_animation_direction = tag_animation_direction; // 标签动画方向
@@ -2097,6 +2267,7 @@ void set_value_default() {
 	config.xwayland_persistence = xwayland_persistence;
 	config.syncobj_enable = syncobj_enable;
 	config.no_border_when_single = no_border_when_single;
+	config.no_radius_when_single = no_radius_when_single;
 	config.snap_distance = snap_distance;
 	config.drag_tile_to_tile = drag_tile_to_tile;
 	config.enable_floating_snap = enable_floating_snap;
@@ -2130,6 +2301,25 @@ void set_value_default() {
 	config.middle_button_emulation = middle_button_emulation;
 	config.accel_profile = accel_profile;
 	config.accel_speed = accel_speed;
+
+	config.blur = blur;
+	config.blur_layer = blur_layer;
+	config.blur_optimized = blur_optimized;
+	config.border_radius = border_radius;
+	config.blur_params.num_passes = blur_params_num_passes;
+	config.blur_params.radius = blur_params_radius;
+	config.blur_params.noise = blur_params_noise;
+	config.blur_params.brightness = blur_params_brightness;
+	config.blur_params.contrast = blur_params_contrast;
+	config.blur_params.saturation = blur_params_saturation;
+	config.shadows = shadows;
+	config.shadows_size = shadows_size;
+	config.shadows_blur = shadows_blur;
+	config.shadows_position_x = shadows_position_x;
+	config.shadows_position_y = shadows_position_y;
+	config.focused_opacity = focused_opacity;
+	config.unfocused_opacity = unfocused_opacity;
+	memcpy(config.shadowscolor, shadowscolor, sizeof(shadowscolor));
 
 	memcpy(config.animation_curve_move, animation_curve_move,
 		   sizeof(animation_curve_move));
@@ -2241,15 +2431,44 @@ void parse_config(void) {
 	override_config();
 }
 
+void reset_blur_params(void) {
+	if (blur) {
+		Monitor *m;
+		wl_list_for_each(m, &mons, link) {
+			if (m->blur != NULL) {
+				wlr_scene_node_destroy(&m->blur->node);
+			}
+			m->blur = wlr_scene_optimized_blur_create(&scene->tree, 0, 0);
+			wlr_scene_node_reparent(&m->blur->node, layers[LyrBlur]);
+			wlr_scene_optimized_blur_set_size(m->blur, m->m.width, m->m.height);
+			wlr_scene_set_blur_data(
+				scene, blur_params.num_passes, blur_params.radius,
+				blur_params.noise, blur_params.brightness, blur_params.contrast,
+				blur_params.saturation);
+		}
+	} else {
+		Monitor *m;
+		wl_list_for_each(m, &mons, link) {
+
+			if (m->blur) {
+				wlr_scene_node_destroy(&m->blur->node);
+				m->blur = NULL;
+			}
+		}
+	}
+}
+
 void reload_config(const Arg *arg) {
 	Client *c;
 	Monitor *m;
 	int i, jk;
 	Keyboard *kb;
+	char *rule_monitor_name = NULL;
 	parse_config();
 	init_baked_points();
 	handlecursoractivity();
 	reset_keyboard_layout();
+	reset_blur_params();
 	run_exec();
 
 	// reset border width when config change
@@ -2291,12 +2510,16 @@ void reload_config(const Arg *arg) {
 
 		// apply tag rule
 		for (i = 1; i <= config.tag_rules_count; i++) {
-			for (jk = 0; jk < LENGTH(layouts); jk++) {
-				if (config.tag_rules_count > 0 &&
-					strcmp(layouts[jk].name,
-						   config.tag_rules[i - 1].layout_name) == 0) {
-					m->pertag->ltidxs[config.tag_rules[i - 1].id] =
-						&layouts[jk];
+			rule_monitor_name = config.tag_rules[i - 1].monitor_name;
+			if (regex_match(rule_monitor_name, m->wlr_output->name) ||
+				!rule_monitor_name) {
+				for (jk = 0; jk < LENGTH(layouts); jk++) {
+					if (config.tag_rules_count > 0 &&
+						strcmp(layouts[jk].name,
+							   config.tag_rules[i - 1].layout_name) == 0) {
+						m->pertag->ltidxs[config.tag_rules[i - 1].id] =
+							&layouts[jk];
+					}
 				}
 			}
 		}

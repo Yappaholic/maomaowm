@@ -1,11 +1,17 @@
 /*
  * See LICENSE file for copyright and license details.
  */
+#include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "wlr/util/box.h"
 #include <getopt.h>
 #include <libinput.h>
 #include <limits.h>
 #include <linux/input-event-codes.h>
+#include <scenefx/render/fx_renderer/fx_renderer.h>
+#include <scenefx/types/fx/blur_data.h>
+#include <scenefx/types/fx/clipped_region.h>
+#include <scenefx/types/fx/corner_location.h>
+#include <scenefx/types/wlr_scene.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -55,7 +61,6 @@
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
-#include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_server_decoration.h>
@@ -119,14 +124,15 @@ enum { XDGShell, LayerShell, X11 };					/* client types */
 enum { AxisUp, AxisDown, AxisLeft, AxisRight };		// 滚轮滚动的方向
 enum {
 	LyrBg,
+	LyrBlur,
 	LyrBottom,
 	LyrTile,
 	LyrFloat,
-	LyrFS,
 	LyrTop,
+	LyrFadeOut,
+	LyrFS,
 	LyrOverlay,
 	LyrIMPopup, // text-input layer
-	LyrFadeOut,
 	LyrBlock,
 	NUM_LAYERS
 }; /* scene layers */
@@ -201,6 +207,9 @@ typedef struct {
 	float height_scale;
 	int width;
 	int height;
+	double percent;
+	float opacity;
+	enum corner_location corner_location;
 	bool should_scale;
 } animationScale;
 
@@ -212,7 +221,8 @@ struct Client {
 		overview_backup_geom, current; /* layout-relative, includes border */
 	Monitor *mon;
 	struct wlr_scene_tree *scene;
-	struct wlr_scene_rect *border[4]; /* top, bottom, left, right */
+	struct wlr_scene_rect *border; /* top, bottom, left, right */
+	struct wlr_scene_shadow *shadow;
 	struct wlr_scene_tree *scene_surface;
 	struct wl_list link;
 	struct wl_list flink;
@@ -285,6 +295,8 @@ struct Client {
 	int nofadeout;
 	int no_force_center;
 	int isunglobal;
+	float focused_opacity;
+	float unfocused_opacity;
 	char oldmonname[128];
 };
 
@@ -332,12 +344,13 @@ typedef struct {
 typedef struct {
 	/* Must keep these three elements in this order */
 	unsigned int type; /* LayerShell */
-	struct wlr_box geom;
+	struct wlr_box geom, current, pending, animainit_geom;
 	Monitor *mon;
 	struct wlr_scene_tree *scene;
 	struct wlr_scene_tree *popups;
 	struct wlr_scene_layer_surface_v1 *scene_layer;
 	struct wl_list link;
+	struct wl_list fadeout_link;
 	int mapped;
 	struct wlr_layer_surface_v1 *layer_surface;
 
@@ -345,6 +358,12 @@ typedef struct {
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener surface_commit;
+
+	struct dwl_animation animation;
+	bool dirty;
+	int noblur;
+	int noanim;
+	bool need_output_flush;
 } LayerSurface;
 
 typedef struct {
@@ -384,6 +403,8 @@ struct Monitor {
 	int gamma_lut_changed;
 	int asleep;
 	unsigned int visible_clients;
+	struct wlr_scene_optimized_blur *blur;
+	char last_surface_ws_name[256];
 };
 
 typedef struct {
@@ -458,6 +479,7 @@ static void cleanupmon(struct wl_listener *listener, void *data); // 退出清�
 static void closemon(Monitor *m);
 static void cleanuplisteners(void);
 static void toggle_hotarea(int x_root, int y_root); // 触发热区
+static void maplayersurfacenotify(struct wl_listener *listener, void *data);
 static void commitlayersurfacenotify(struct wl_listener *listener, void *data);
 static void commitnotify(struct wl_listener *listener, void *data);
 static void createdecoration(struct wl_listener *listener, void *data);
@@ -511,7 +533,6 @@ static void locksession(struct wl_listener *listener, void *data);
 static void mapnotify(struct wl_listener *listener, void *data);
 static void maximizenotify(struct wl_listener *listener, void *data);
 static void minimizenotify(struct wl_listener *listener, void *data);
-static void monocle(Monitor *m);
 static void motionabsolute(struct wl_listener *listener, void *data);
 static void motionnotify(unsigned int time, struct wlr_input_device *device,
 						 double sx, double sy, double sx_unaccel,
@@ -550,13 +571,6 @@ static void setsel(struct wl_listener *listener, void *data);
 static void setup(void);
 static void startdrag(struct wl_listener *listener, void *data);
 
-static void tile(Monitor *m);
-static void overview(Monitor *m);
-static void grid(Monitor *m);
-static void scroller(Monitor *m);
-static void deck(Monitor *mon);
-static void dwindle(Monitor *mon);
-static void spiral(Monitor *mon);
 static void unlocksession(struct wl_listener *listener, void *data);
 static void unmaplayersurfacenotify(struct wl_listener *listener, void *data);
 static void unmapnotify(struct wl_listener *listener, void *data);
@@ -579,7 +593,7 @@ static int isdescprocess(pid_t p, pid_t c);
 static Client *termforwin(Client *w);
 static void swallow(Client *c, Client *w);
 
-static void warp_cursor_to_selmon(const Monitor *m);
+static void warp_cursor_to_selmon(Monitor *m);
 unsigned int want_restore_fullscreen(Client *target_client);
 static void overview_restore(Client *c, const Arg *arg);
 static void overview_backup(Client *c);
@@ -596,6 +610,7 @@ static struct wlr_box setclient_coordinate_center(Client *c,
 static unsigned int get_tags_first_tag(unsigned int tags);
 
 static void client_commit(Client *c);
+static void layer_commit(LayerSurface *l);
 static void apply_border(Client *c);
 static void client_set_opacity(Client *c, double opacity);
 static void init_baked_points(void);
@@ -609,6 +624,7 @@ static void buffer_set_effect(Client *c, animationScale scale_data);
 static void snap_scene_buffer_apply_effect(struct wlr_scene_buffer *buffer,
 										   int sx, int sy, void *data);
 static void client_set_pending_state(Client *c);
+static void layer_set_pending_state(LayerSurface *l);
 static void set_rect_size(struct wlr_scene_rect *rect, int width, int height);
 static Client *center_select(Monitor *m);
 static void handlecursoractivity(void);
@@ -617,9 +633,12 @@ static bool check_hit_no_border(Client *c);
 static void reset_keyboard_layout(void);
 static void client_update_oldmonname_record(Client *c, Monitor *m);
 static void pending_kill_client(Client *c);
+static void set_layer_open_animaiton(LayerSurface *l, struct wlr_box geo);
+static void init_fadeout_layers(LayerSurface *l);
 
 #include "data/static_keymap.h"
 #include "dispatch/dispatch.h"
+#include "layout/layout.h"
 
 /* variables */
 static const char broken[] = "broken";
@@ -644,6 +663,7 @@ static struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
 static struct wl_list clients; /* tiling order */
 static struct wl_list fstack;  /* focus order */
 static struct wl_list fadeout_clients;
+static struct wl_list fadeout_layers;
 static struct wlr_idle_notifier_v1 *idle_notifier;
 static struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
 static struct wlr_layer_shell_v1 *layer_shell;
@@ -764,7 +784,8 @@ static struct wlr_xwayland *xwayland;
 #include "client/client.h"
 #include "config/parse_config.h"
 #include "ext-protocol/all.h"
-#include "layout/layout.h"
+#include "layout/horizontal.h"
+#include "layout/vertical.h"
 
 struct dvec2 calculate_animation_curve_at(double t, int type) {
 	struct dvec2 point;
@@ -846,39 +867,14 @@ double find_animation_curve_at(double t, int type) {
 
 void apply_opacity_to_rect_nodes(Client *c, struct wlr_scene_node *node,
 								 double animation_passed) {
-	int offsetx = 0;
-	int offsety = 0;
 	if (node->type == WLR_SCENE_NODE_RECT) {
 		struct wlr_scene_rect *rect = wlr_scene_rect_from_node(node);
 		// Assuming the rect has a color field and we can modify it
-		rect->color[0] = (1 - animation_passed) * rect->color[0];
-		rect->color[1] = (1 - animation_passed) * rect->color[1];
-		rect->color[2] = (1 - animation_passed) * rect->color[2];
-		rect->color[3] = (1 - animation_passed) * rect->color[3];
+		rect->color[0] = 0;
+		rect->color[1] = 0;
+		rect->color[2] = 0;
+		rect->color[3] = 0;
 		wlr_scene_rect_set_color(rect, rect->color);
-
-		offsetx = c->geom.width - c->animation.current.width;
-		offsety = c->geom.height - c->animation.current.height;
-		if (node->y > c->geom.y + c->geom.height / 2) {
-			wlr_scene_node_set_position(node, c->geom.x,
-										c->geom.y + c->geom.height - offsety);
-			wlr_scene_rect_set_size(rect, c->animation.current.width,
-									c->bw); // down
-		} else if (node->y < c->geom.y + c->geom.height / 2 &&
-				   rect->width > rect->height) {
-			wlr_scene_node_set_position(node, c->geom.x, c->geom.y);
-			wlr_scene_rect_set_size(rect, c->animation.current.width,
-									c->bw); // up
-		} else if (node->x < c->geom.x + c->geom.width / 2 &&
-				   rect->width < rect->height) {
-			wlr_scene_rect_set_size(rect, c->bw,
-									c->animation.current.height); // left
-		} else {
-			wlr_scene_node_set_position(
-				node, c->geom.x + c->geom.width - offsetx, c->geom.y);
-			wlr_scene_rect_set_size(rect, c->bw,
-									c->animation.current.height); // right
-		}
 	}
 
 	// If the node is a tree, recursively traverse its children
@@ -888,6 +884,51 @@ void apply_opacity_to_rect_nodes(Client *c, struct wlr_scene_node *node,
 		wl_list_for_each(child, &scene_tree->children, link) {
 			apply_opacity_to_rect_nodes(c, child, animation_passed);
 		}
+	}
+}
+
+void fadeout_layer_animation_next_tick(LayerSurface *l) {
+	if (!l)
+		return;
+
+	double animation_passed =
+		(double)l->animation.passed_frames / l->animation.total_frames;
+	int type = l->animation.action = l->animation.action;
+	double factor = find_animation_curve_at(animation_passed, type);
+	unsigned int width =
+		l->animation.initial.width +
+		(l->current.width - l->animation.initial.width) * factor;
+	unsigned int height =
+		l->animation.initial.height +
+		(l->current.height - l->animation.initial.height) * factor;
+
+	unsigned int x = l->animation.initial.x +
+					 (l->current.x - l->animation.initial.x) * factor;
+	unsigned int y = l->animation.initial.y +
+					 (l->current.y - l->animation.initial.y) * factor;
+
+	wlr_scene_node_set_position(&l->scene->node, x, y);
+
+	l->animation.current = (struct wlr_box){
+		.x = x,
+		.y = y,
+		.width = width,
+		.height = height,
+	};
+
+	double opacity = MAX(fadeout_begin_opacity - animation_passed, 0);
+
+	if (animation_fade_out)
+		wlr_scene_node_for_each_buffer(&l->scene->node,
+									   scene_buffer_apply_opacity, &opacity);
+
+	if (animation_passed == 1.0) {
+		wl_list_remove(&l->fadeout_link);
+		wlr_scene_node_destroy(&l->scene->node);
+		free(l);
+		l = NULL;
+	} else {
+		l->animation.passed_frames++;
 	}
 }
 
@@ -954,6 +995,47 @@ void fadeout_client_animation_next_tick(Client *c) {
 	}
 }
 
+void layer_animation_next_tick(LayerSurface *l) {
+
+	if (!l || !l->mapped)
+		return;
+
+	double animation_passed =
+		(double)l->animation.passed_frames / l->animation.total_frames;
+
+	int type = l->animation.action == NONE ? MOVE : l->animation.action;
+	double factor = find_animation_curve_at(animation_passed, type);
+
+	unsigned int width =
+		l->animation.initial.width +
+		(l->current.width - l->animation.initial.width) * factor;
+	unsigned int height =
+		l->animation.initial.height +
+		(l->current.height - l->animation.initial.height) * factor;
+
+	unsigned int x = l->animation.initial.x +
+					 (l->current.x - l->animation.initial.x) * factor;
+	unsigned int y = l->animation.initial.y +
+					 (l->current.y - l->animation.initial.y) * factor;
+
+	wlr_scene_node_set_position(&l->scene->node, x, y);
+
+	l->animation.current = (struct wlr_box){
+		.x = x,
+		.y = y,
+		.width = width,
+		.height = height,
+	};
+
+	if (animation_passed == 1.0) {
+		l->animation.running = false;
+		l->need_output_flush = false;
+		l->animation.action = MOVE;
+	} else {
+		l->animation.passed_frames++;
+	}
+}
+
 void client_animation_next_tick(Client *c) {
 	double animation_passed =
 		(double)c->animation.passed_frames / c->animation.total_frames;
@@ -985,19 +1067,9 @@ void client_animation_next_tick(Client *c) {
 		.height = height,
 	};
 
-	if (!c->iskilling && (c->is_open_animation || c->animation.begin_fade_in) &&
-		animation_fade_in && !c->nofadein) {
-		c->animation.begin_fade_in = true;
-		client_set_opacity(c,
-						   MIN(animation_passed + fadein_begin_opacity, 1.0));
-	}
-
 	c->is_open_animation = false;
 
 	if (animation_passed == 1.0) {
-		if (c->animation.begin_fade_in) {
-			c->animation.begin_fade_in = false;
-		}
 
 		// clear the open action state
 		// To prevent him from being mistaken that
@@ -1068,19 +1140,72 @@ bool check_hit_no_border(Client *c) {
 	return hit_no_border;
 }
 
-void apply_border(Client *c) {
+void client_draw_shadow(Client *c) {
+
 	if (c->iskilling || !client_surface(c)->mapped)
 		return;
 
+	if (!shadows || !c->isfloating) {
+		wlr_scene_shadow_set_size(c->shadow, 0, 0);
+		return;
+	}
+
+	uint32_t width, height;
+	client_actual_size(c, &width, &height);
+
+	uint32_t delta = shadows_size + c->bw;
+
+	/* we calculate where to clip the shadow */
+	struct wlr_box client_box = {
+		.x = 0,
+		.y = 0,
+		.width = width,
+		.height = height,
+	};
+
+	struct wlr_box shadow_box = {
+		.x = shadows_position_x,
+		.y = shadows_position_y,
+		.width = width + 2 * delta,
+		.height = height + 2 * delta,
+	};
+
+	struct wlr_box intersection_box;
+	wlr_box_intersection(&intersection_box, &client_box, &shadow_box);
+	/* clipped region takes shadow relative coords, so we translate everything
+	 * by its position */
+	intersection_box.x -= shadows_position_x;
+	intersection_box.y -= shadows_position_y;
+
+	struct clipped_region clipped_region = {
+		.area = intersection_box,
+		.corner_radius = border_radius,
+		.corners = border_radius_location_default,
+	};
+
+	wlr_scene_node_set_position(&c->shadow->node, shadow_box.x, shadow_box.y);
+
+	wlr_scene_shadow_set_size(c->shadow, shadow_box.width, shadow_box.height);
+	wlr_scene_shadow_set_clipped_region(c->shadow, clipped_region);
+}
+
+void apply_border(Client *c) {
+	if (!c || c->iskilling || !client_surface(c)->mapped)
+		return;
+
 	bool hit_no_border = check_hit_no_border(c);
+	enum corner_location current_corner_location =
+		c->isfullscreen || (no_radius_when_single && c->mon &&
+							c->mon->visible_clients == 1)
+			? CORNER_LOCATION_NONE
+			: CORNER_LOCATION_ALL;
 
 	// Handle no-border cases
 	if (hit_no_border && smartgaps) {
 		c->bw = 0;
 		c->fake_no_border = true;
 	} else if (hit_no_border && !smartgaps) {
-		for (int i = 0; i < 4; i++)
-			set_rect_size(c->border[i], 0, 0);
+		wlr_scene_rect_set_size(c->border, 0, 0);
 		wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
 		c->fake_no_border = true;
 		return;
@@ -1089,92 +1214,83 @@ void apply_border(Client *c) {
 		c->fake_no_border = false;
 	}
 
-	struct wlr_box geom = c->animation.current;
-	int bw = c->bw;
+	struct wlr_box clip_box = c->animation.current;
+	// 一但在GEZERO如果使用无符号，那么其他数据也会转换为无符号导致没有负数出错
+	int bw = (int)c->bw;
 
-	// Calculate how much the window is outside the monitor
-	// These values will be positive when window is outside the monitor
-	int outside_left = GEZERO(c->mon->m.x - c->animation.current.x);
-	int outside_top = GEZERO(c->mon->m.y - c->animation.current.y);
-	int outside_right =
-		GEZERO((c->animation.current.x + c->animation.current.width) -
-			   (c->mon->m.x + c->mon->m.width));
-	int outside_bottom =
-		GEZERO((c->animation.current.y + c->animation.current.height) -
-			   (c->mon->m.y + c->mon->m.height));
+	int right_offset =
+		GEZERO(c->animation.current.x + c->animation.current.width -
+			   c->mon->m.x - c->mon->m.width);
+	int bottom_offset =
+		GEZERO(c->animation.current.y + c->animation.current.height -
+			   c->mon->m.y - c->mon->m.height);
 
-	// Initialize border dimensions
-	int top_width = geom.width;
-	int top_height = bw;
-	int bottom_width = geom.width;
-	int bottom_height = bw;
-	int left_width = bw;
-	int left_height = geom.height - 2 * bw;
-	int right_width = bw;
-	int right_height = geom.height - 2 * bw;
+	int left_offset = GEZERO(c->mon->m.x - c->animation.current.x);
+	int top_offset = GEZERO(c->mon->m.y - c->animation.current.y);
 
-	// Initialize border positions
-	int top_x = 0;
-	int top_y = 0;
-	int bottom_x = 0;
-	int bottom_y = geom.height - bottom_height;
-	int left_x = 0;
-	int left_y = bw;
-	int right_x = geom.width - right_width;
-	int right_y = bw;
+	int inner_surface_width = GEZERO(clip_box.width - 2 * bw);
+	int inner_surface_height = GEZERO(clip_box.height - 2 * bw);
 
-	// Adjust borders when window is outside monitor
-	if (ISTILED(c) || c->animation.tagining || c->animation.tagouted ||
-		c->animation.tagouting) {
-		// Top border - reduce height when window goes above monitor
-		if (outside_top > 0) {
-			top_height = GEZERO(bw - outside_top);
-			top_y = top_y + outside_top;
-			left_height = left_height - outside_top;
-			right_height = right_height - outside_top;
-			left_y = left_y + outside_top;
-			right_y = right_y + outside_top;
-		}
+	int inner_surface_x = GEZERO(bw - left_offset);
+	int inner_surface_y = GEZERO(bw - top_offset);
 
-		// Bottom border - reduce height when window goes below monitor
-		if (outside_bottom > 0) {
-			bottom_height = GEZERO(bw - outside_bottom);
-			left_height = left_height - outside_bottom;
-			right_height = right_height - outside_bottom;
-		}
+	int rect_x = left_offset;
+	int rect_y = top_offset;
 
-		// Left border - reduce width when window goes left of monitor
-		if (outside_left > 0) {
-			left_width = GEZERO(bw - outside_left);
-			left_x = left_x + outside_left;
-			top_width = top_width - outside_left;
-			bottom_width = bottom_width - outside_left;
-			top_x = top_x + outside_left;
-			bottom_x = bottom_x + outside_left;
-		}
+	int rect_width =
+		GEZERO(c->animation.current.width - left_offset - right_offset);
+	int rect_height =
+		GEZERO(c->animation.current.height - top_offset - bottom_offset);
 
-		// Right border - reduce width when window goes right of monitor
-		if (outside_right > 0) {
-			right_width = GEZERO(bw - outside_right);
-			top_width = top_width - outside_right;
-			bottom_width = bottom_width - outside_right;
-		}
+	if (left_offset > c->bw)
+		inner_surface_width = inner_surface_width - left_offset + c->bw;
+
+	if (top_offset > c->bw)
+		inner_surface_height = inner_surface_height - top_offset + c->bw;
+
+	if (right_offset > 0) {
+		inner_surface_width =
+			MIN(clip_box.width, inner_surface_width + right_offset);
 	}
 
-	// Position the surface within the borders
-	wlr_scene_node_set_position(&c->scene_surface->node, bw, bw);
+	if (bottom_offset > 0) {
+		inner_surface_height =
+			MIN(clip_box.height, inner_surface_height + bottom_offset);
+	}
 
-	// Set border sizes
-	set_rect_size(c->border[0], top_width, top_height);		  // Top
-	set_rect_size(c->border[1], bottom_width, bottom_height); // Bottom
-	set_rect_size(c->border[2], left_width, left_height);	  // Left
-	set_rect_size(c->border[3], right_width, right_height);	  // Right
+	struct clipped_region clipped_region = {
+		.area = {inner_surface_x, inner_surface_y, inner_surface_width,
+				 inner_surface_height},
+		.corner_radius = border_radius,
+		.corners = current_corner_location,
+	};
 
-	// Position borders with offsets
-	wlr_scene_node_set_position(&c->border[0]->node, top_x, top_y);
-	wlr_scene_node_set_position(&c->border[1]->node, bottom_x, bottom_y);
-	wlr_scene_node_set_position(&c->border[2]->node, left_x, left_y);
-	wlr_scene_node_set_position(&c->border[3]->node, right_x, right_y);
+	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
+	wlr_scene_rect_set_size(c->border, rect_width, rect_height);
+	wlr_scene_node_set_position(&c->border->node, rect_x, rect_y);
+	wlr_scene_rect_set_corner_radius(c->border, border_radius,
+									 current_corner_location);
+	wlr_scene_rect_set_clipped_region(c->border, clipped_region);
+}
+
+enum corner_location set_client_corner_location(Client *c) {
+	enum corner_location current_corner_location = CORNER_LOCATION_ALL;
+	struct wlr_box target_geom = animations ? c->animation.current : c->geom;
+	if (target_geom.x + border_radius <= c->mon->m.x) {
+		current_corner_location &= ~CORNER_LOCATION_LEFT; // 清除左标志位
+	}
+	if (target_geom.x + target_geom.width - border_radius >=
+		c->mon->m.x + c->mon->m.width) {
+		current_corner_location &= ~CORNER_LOCATION_RIGHT; // 清除右标志位
+	}
+	if (target_geom.y + border_radius <= c->mon->m.y) {
+		current_corner_location &= ~CORNER_LOCATION_TOP; // 清除上标志位
+	}
+	if (target_geom.y + target_geom.height - border_radius >=
+		c->mon->m.y + c->mon->m.height) {
+		current_corner_location &= ~CORNER_LOCATION_BOTTOM; // 清除下标志位
+	}
+	return current_corner_location;
 }
 
 struct ivec2 clip_to_hide(Client *c, struct wlr_box *clip_box) {
@@ -1250,8 +1366,21 @@ void client_apply_clip(Client *c) {
 	if (c->iskilling || !client_surface(c)->mapped)
 		return;
 	struct wlr_box clip_box;
+	bool should_render_client_surface = false;
 	struct ivec2 offset;
 	animationScale scale_data;
+	struct wlr_box surface_clip;
+	enum corner_location current_corner_location =
+		set_client_corner_location(c);
+
+	float percent =
+		c->animation.action == OPEN && animation_fade_in && !c->nofadein
+			? (double)c->animation.passed_frames / c->animation.total_frames
+			: 1.0;
+	float opacity = c->isfullscreen	   ? 1
+					: c == selmon->sel ? c->focused_opacity
+									   : c->unfocused_opacity;
+
 	int bw = (int)c->bw;
 
 	if (!animations) {
@@ -1259,15 +1388,31 @@ void client_apply_clip(Client *c) {
 		c->need_output_flush = false;
 		c->animainit_geom = c->current = c->pending = c->animation.current =
 			c->geom;
+
 		client_get_clip(c, &clip_box);
+
 		offset = clip_to_hide(c, &clip_box);
+
 		apply_border(c);
 
-		if (clip_box.width <= 0 || clip_box.height <= 0)
-			return;
+		client_draw_shadow(c);
 
-		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip_box);
-		buffer_set_effect(c, (animationScale){0, 0, 0, 0, false});
+		surface_clip = clip_box;
+		surface_clip.width = surface_clip.width - GEZERO(bw - offset.width);
+		surface_clip.height = surface_clip.height - GEZERO(bw - offset.height);
+
+		scale_data.opacity = c->isfullscreen	? 1
+							 : c == selmon->sel ? c->focused_opacity
+												: c->unfocused_opacity;
+
+		if (surface_clip.width <= 0 || surface_clip.height <= 0) {
+			return;
+		}
+
+		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node,
+										   &surface_clip);
+		buffer_set_effect(c, (animationScale){0, 0, 0, 0, opacity, opacity,
+											  current_corner_location, false});
 		return;
 	}
 
@@ -1289,12 +1434,29 @@ void client_apply_clip(Client *c) {
 	}
 
 	offset = clip_to_hide(c, &clip_box);
+
 	apply_border(c);
 
-	if (clip_box.width <= 0 || clip_box.height <= 0)
-		return;
+	surface_clip = clip_box;
+	surface_clip.width = surface_clip.width - GEZERO(bw - offset.width);
+	surface_clip.height = surface_clip.height - GEZERO(bw - offset.height);
 
-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip_box);
+	if (surface_clip.width <= 0 || surface_clip.height <= 0) {
+		should_render_client_surface = false;
+		wlr_scene_node_set_enabled(&c->scene_surface->node, false);
+	} else {
+		should_render_client_surface = true;
+		wlr_scene_node_set_enabled(&c->scene_surface->node, true);
+	}
+
+	apply_border(c);
+	client_draw_shadow(c);
+
+	if (!should_render_client_surface) {
+		return;
+	}
+
+	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &surface_clip);
 
 	scale_data.should_scale = true;
 	scale_data.width = clip_box.width - GEZERO(bw - offset.width);
@@ -1303,13 +1465,45 @@ void client_apply_clip(Client *c) {
 		(float)scale_data.width / (geometry.width - offset.x);
 	scale_data.height_scale =
 		(float)scale_data.height / (geometry.height - offset.y);
+	scale_data.corner_location = current_corner_location;
+	scale_data.percent = percent;
+	scale_data.opacity = opacity;
 	buffer_set_effect(c, scale_data);
+}
+
+bool layer_draw_frame(LayerSurface *l) {
+
+	if (!l || !l->mapped)
+		return false;
+
+	if (!l->need_output_flush)
+		return false;
+
+	if (l->layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_TOP &&
+		l->layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY) {
+		return false;
+	}
+
+	if (animations && layer_animations && l->animation.running && !l->noanim) {
+		layer_animation_next_tick(l);
+	} else {
+		l->need_output_flush = false;
+	}
+	return true;
 }
 
 bool client_draw_frame(Client *c) {
 
 	if (!c || !client_surface(c)->mapped)
 		return false;
+
+	if (c->isfullscreen) {
+		client_set_opacity(c, 1);
+	} else if (c == selmon->sel && !c->animation.running) {
+		client_set_opacity(c, c->focused_opacity);
+	} else if (!c->animation.running) {
+		client_set_opacity(c, c->unfocused_opacity);
+	}
 
 	if (!c->need_output_flush)
 		return false;
@@ -1336,6 +1530,14 @@ bool client_draw_fadeout_frame(Client *c) {
 	return true;
 }
 
+bool layer_draw_fadeout_frame(LayerSurface *l) {
+	if (!l)
+		return false;
+
+	fadeout_layer_animation_next_tick(l);
+	return true;
+}
+
 void applybounds(Client *c, struct wlr_box *bbox) {
 	/* set minimum possible */
 	c->geom.width = MAX(1 + 2 * (int)c->bw, c->geom.width);
@@ -1358,7 +1560,7 @@ void clear_fullscreen_flag(Client *c) {
 		c->isfloating = 0;
 		c->ismaxmizescreen = 0;
 		c->bw = c->isnoborder ? 0 : borderpx;
-		client_set_fullscreen(c, false);
+		setfullscreen(c, false);
 	}
 }
 
@@ -1652,7 +1854,7 @@ void gpureset(struct wl_listener *listener, void *data) {
 
 	wlr_log(WLR_DEBUG, "gpu reset");
 
-	if (!(drw = wlr_renderer_autocreate(backend)))
+	if (!(drw = fx_renderer_create(backend)))
 		die("couldn't recreate renderer");
 
 	if (!(alloc = wlr_allocator_autocreate(backend, drw)))
@@ -1728,7 +1930,7 @@ setclient_coordinate_center(Client *c, struct wlr_box geom, int offsetx,
 	tempbox.height = geom.height;
 
 	if (offsetx != 0) {
-		len = m->w.width / 2;
+		len = (m->w.width - c->geom.width - 2 * m->gappoh) / 2;
 		offset = len * (offsetx / 100.0);
 		tempbox.x += offset;
 
@@ -1741,7 +1943,7 @@ setclient_coordinate_center(Client *c, struct wlr_box geom, int offsetx,
 		}
 	}
 	if (offsety != 0) {
-		len = m->w.height;
+		len = (m->w.height - c->geom.height - 2 * m->gappov) / 2;
 		offset = len * (offsety / 100.0);
 		tempbox.y += offset;
 
@@ -1855,6 +2057,11 @@ applyrules(Client *c) {
 			c->isglobal = r->isglobal >= 0 ? r->isglobal : c->isglobal;
 			c->isoverlay = r->isoverlay >= 0 ? r->isoverlay : c->isoverlay;
 			c->isunglobal = r->isunglobal >= 0 ? r->isunglobal : c->isunglobal;
+			c->focused_opacity = r->focused_opacity > 0.0f ? r->focused_opacity
+														   : c->focused_opacity;
+			c->unfocused_opacity = r->unfocused_opacity > 0.0f
+									   ? r->unfocused_opacity
+									   : c->unfocused_opacity;
 
 			newtags = r->tags > 0 ? r->tags | newtags : newtags;
 			i = 0;
@@ -1937,6 +2144,15 @@ applyrules(Client *c) {
 	setborder_color(c);
 }
 
+bool is_scroller_layout(Monitor *m) {
+	if (strcmp(m->pertag->ltidxs[m->pertag->curtag]->name, "scroller") == 0)
+		return true;
+	if (strcmp(m->pertag->ltidxs[m->pertag->curtag]->name,
+			   "vertical_scroller") == 0)
+		return true;
+	return false;
+}
+
 void // 17
 arrange(Monitor *m, bool want_animation) {
 	Client *c;
@@ -1966,8 +2182,7 @@ arrange(Monitor *m, bool want_animation) {
 				}
 
 				if (!c->is_clip_to_hide || !ISTILED(c) ||
-					strcmp(c->mon->pertag->ltidxs[c->mon->pertag->curtag]->name,
-						   "scroller") != 0) {
+					!is_scroller_layout(c->mon)) {
 					c->is_clip_to_hide = false;
 					wlr_scene_node_set_enabled(&c->scene->node, true);
 				}
@@ -2440,7 +2655,7 @@ void arrangelayers(Monitor *m) {
 			if (locked ||
 				l->layer_surface->current.keyboard_interactive !=
 					ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE ||
-				!l->mapped)
+				!l->mapped || l == exclusive_focus)
 				continue;
 			/* Deactivate the focused client. */
 			focusclient(NULL, 0);
@@ -2702,7 +2917,10 @@ buttonpress(struct wl_listener *listener, void *data) {
 				motionnotify(0, NULL, 0, 0, 0, 0);
 			}
 
-			if (l && l->layer_surface->current.keyboard_interactive) {
+			// 聚焦按需要交互焦点的layer，但注意不能抢占独占焦点的layer
+			if (l && !exclusive_focus &&
+				l->layer_surface->current.keyboard_interactive ==
+					ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND) {
 				focusclient(NULL, 0);
 				client_notify_enter(l->layer_surface->surface,
 									wlr_seat_get_keyboard(seat));
@@ -2901,6 +3119,10 @@ void cleanupmon(struct wl_listener *listener, void *data) {
 	wlr_scene_output_destroy(m->scene_output);
 
 	closemon(m);
+	if (m->blur) {
+		wlr_scene_node_destroy(&m->blur->node);
+		m->blur = NULL;
+	}
 	// wlr_scene_node_destroy(&m->fullscreen_bg->node);
 	free(m);
 }
@@ -2940,12 +3162,167 @@ void closemon(Monitor *m) {
 	}
 }
 
+static void iter_layer_scene_buffers(struct wlr_scene_buffer *buffer, int sx,
+									 int sy, void *user_data) {
+	struct wlr_scene_surface *scene_surface =
+		wlr_scene_surface_try_from_buffer(buffer);
+	if (!scene_surface) {
+		return;
+	}
+
+	wlr_scene_buffer_set_backdrop_blur(buffer, true);
+	wlr_scene_buffer_set_backdrop_blur_ignore_transparent(buffer, true);
+	if (blur_optimized) {
+		wlr_scene_buffer_set_backdrop_blur_optimized(buffer, true);
+	} else {
+		wlr_scene_buffer_set_backdrop_blur_optimized(buffer, false);
+	}
+}
+
+void get_layer_target_geometry(LayerSurface *l, struct wlr_box *target_box) {
+
+	if (!l || !l->mapped)
+		return;
+
+	const struct wlr_layer_surface_v1_state *state = &l->layer_surface->current;
+
+	// 限制区域
+	// waybar一般都是大于0,表示要占用多少区域，所以计算位置也要用全部区域作为基准
+	// 如果是-1可能表示独占所有可用空间
+	// 如果是0，应该是表示使用exclusive_zone外的可用区域
+	struct wlr_box bounds;
+	if (state->exclusive_zone > 0 || state->exclusive_zone == -1)
+		bounds = l->mon->m;
+	else
+		bounds = l->mon->w;
+
+	// 初始化几何位置
+	struct wlr_box box = {.width = state->desired_width,
+						  .height = state->desired_height};
+
+	// 水平方向定位
+	const uint32_t both_horiz =
+		ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+	if (box.width == 0) {
+		box.x = bounds.x;
+	} else if ((state->anchor & both_horiz) == both_horiz) {
+		box.x = bounds.x + ((bounds.width - box.width) / 2);
+	} else if (state->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT) {
+		box.x = bounds.x;
+	} else if (state->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT) {
+		box.x = bounds.x + (bounds.width - box.width);
+	} else {
+		box.x = bounds.x + ((bounds.width - box.width) / 2);
+	}
+
+	// 垂直方向定位
+	const uint32_t both_vert =
+		ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
+	if (box.height == 0) {
+		box.y = bounds.y;
+	} else if ((state->anchor & both_vert) == both_vert) {
+		box.y = bounds.y + ((bounds.height - box.height) / 2);
+	} else if (state->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP) {
+		box.y = bounds.y;
+	} else if (state->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM) {
+		box.y = bounds.y + (bounds.height - box.height);
+	} else {
+		box.y = bounds.y + ((bounds.height - box.height) / 2);
+	}
+
+	// 应用边距
+	if (box.width == 0) {
+		box.x += state->margin.left;
+		box.width = bounds.width - (state->margin.left + state->margin.right);
+	} else if (!(state->anchor & both_horiz)) {
+		if (state->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT) {
+			box.x += state->margin.left;
+		} else if (state->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT) {
+			box.x -= state->margin.right;
+		}
+	}
+
+	if (box.height == 0) {
+		box.y += state->margin.top;
+		box.height = bounds.height - (state->margin.top + state->margin.bottom);
+	} else if (!(state->anchor & both_vert)) {
+		if (state->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP) {
+			box.y += state->margin.top;
+		} else if (state->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM) {
+			box.y -= state->margin.bottom;
+		}
+	}
+
+	target_box->x = box.x;
+	target_box->y = box.y;
+	target_box->width = box.width;
+	target_box->height = box.height;
+}
+
+void maplayersurfacenotify(struct wl_listener *listener, void *data) {
+	int ji;
+
+	LayerSurface *l = wl_container_of(listener, l, map);
+	l->mapped = 1;
+
+	if (!l->mon)
+		return;
+	struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
+	strncpy(l->mon->last_surface_ws_name, layer_surface->namespace,
+			sizeof(l->mon->last_surface_ws_name) - 1); // 最多拷贝255个字符
+	l->mon->last_surface_ws_name[sizeof(l->mon->last_surface_ws_name) - 1] =
+		'\0'; // 确保字符串以null结尾
+
+	struct wlr_box box;
+	get_layer_target_geometry(l, &box);
+
+	// 更新几何位置
+	l->noanim = 0;
+	l->dirty = false;
+	l->noblur = 0;
+
+	// 应用layer规则
+	for (ji = 0; ji < config.layer_rules_count; ji++) {
+		if (config.layer_rules_count < 1)
+			break;
+		if (strcmp(config.layer_rules[ji].layer_name,
+				   l->layer_surface->namespace) == 0) {
+			if (config.layer_rules[ji].noblur > 0) {
+				l->noblur = 1;
+			}
+			if (config.layer_rules[ji].noanim > 0) {
+				l->noanim = 1;
+			}
+		}
+	}
+
+	if (animations && layer_animations && !l->noanim) {
+		l->need_output_flush = true;
+		l->animation.action = OPEN;
+		l->geom = box;
+		layer_set_pending_state(l);
+	}
+	// 刷新布局，让窗口能感应到exclude_zone变化以及设置独占表面
+	arrangelayers(l->mon);
+
+	// 按需交互layer需要像正常窗口一样抢占非独占layer的焦点
+	if (!exclusive_focus &&
+		l->layer_surface->current.keyboard_interactive ==
+			ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND) {
+		focusclient(NULL, 0);
+		client_notify_enter(l->layer_surface->surface,
+							wlr_seat_get_keyboard(seat));
+	}
+}
+
 void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
 	LayerSurface *l = wl_container_of(listener, l, surface_commit);
 	struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
 	struct wlr_scene_tree *scene_layer =
 		layers[layermap[layer_surface->current.layer]];
 	struct wlr_layer_surface_v1_state old_state;
+	struct wlr_layer_surface_v1 *wlr_layer_surface = l->layer_surface;
+	struct wlr_box box;
 
 	if (l->layer_surface->initial_commit) {
 		client_set_scale(layer_surface->surface, l->mon->wlr_output->scale);
@@ -2956,7 +3333,49 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
 		l->layer_surface->current = l->layer_surface->pending;
 		arrangelayers(l->mon);
 		l->layer_surface->current = old_state;
+
 		return;
+	}
+
+	get_layer_target_geometry(l, &box);
+
+	if (animations && layer_animations && !l->noanim && l->mapped &&
+		wlr_layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
+		wlr_layer_surface->current.layer !=
+			ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND &&
+		!wlr_box_equal(&box, &l->geom)) {
+
+		l->geom = box;
+		l->animation.action = MOVE;
+		l->need_output_flush = true;
+		layer_set_pending_state(l);
+	}
+
+	// wlr_scene_node_set_position(&l->scene->node, 10, 10);
+	// wlr_output_schedule_frame(l->mon->wlr_output);
+
+	if (blur && blur_layer) {
+		// 设置非背景layer模糊
+
+		if (!l->noblur &&
+			wlr_layer_surface->current.layer !=
+				ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
+			wlr_layer_surface->current.layer !=
+				ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND) {
+
+			wlr_scene_node_for_each_buffer(&l->scene->node,
+										   iter_layer_scene_buffers, l);
+		}
+	}
+
+	if (blur) {
+		// 如果背景层发生变化,标记优化的模糊背景缓存需要更新
+		if (wlr_layer_surface->current.layer ==
+			ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND) {
+			if (l->mon) {
+				wlr_scene_optimized_blur_mark_dirty(l->mon->blur);
+			}
+		}
 	}
 
 	if (layer_surface == exclusive_focus &&
@@ -2983,6 +3402,33 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
 	arrangelayers(l->mon);
 }
 
+void layer_set_pending_state(LayerSurface *l) {
+
+	if (!l || !l->mapped)
+		return;
+
+	l->pending = l->geom;
+	if (l->animation.action == OPEN)
+		set_layer_open_animaiton(l, l->geom);
+	else
+		l->animainit_geom = l->animation.current;
+	// 判断是否需要动画
+	if (!animations || !layer_animations || l->noanim ||
+		l->layer_surface->current.layer ==
+			ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND ||
+		l->layer_surface->current.layer == ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM) {
+		l->animation.should_animate = false;
+	} else {
+		l->animation.should_animate = true;
+	}
+
+	l->animation.duration = animation_duration_open;
+	l->animation.action = OPEN;
+	// 开始动画
+	layer_commit(l);
+	l->dirty = true;
+}
+
 void client_set_pending_state(Client *c) {
 
 	// 判断是否需要动画
@@ -3003,7 +3449,7 @@ void client_set_pending_state(Client *c) {
 	c->dirty = true;
 }
 
-double output_frame_duration_ms(Client *c) {
+double output_frame_duration_ms() {
 	int32_t refresh_total = 0;
 	Monitor *m;
 	wl_list_for_each(m, &mons, link) {
@@ -3013,6 +3459,32 @@ double output_frame_duration_ms(Client *c) {
 		refresh_total += m->wlr_output->refresh;
 	}
 	return 1000000.0 / refresh_total;
+}
+
+void layer_commit(LayerSurface *l) {
+
+	if (!l || !l->mapped)
+		return;
+
+	l->current = l->pending; // 设置动画的结束位置
+
+	if (l->animation.should_animate) {
+		if (!l->animation.running) {
+			l->animation.current = l->animainit_geom;
+		}
+
+		l->animation.initial = l->animainit_geom;
+		// 设置动画速度
+		l->animation.passed_frames = 0;
+		l->animation.total_frames =
+			l->animation.duration / output_frame_duration_ms();
+
+		// 标记动画开始
+		l->animation.running = true;
+		l->animation.should_animate = false;
+	}
+	// 请求刷新屏幕
+	wlr_output_schedule_frame(l->mon->wlr_output);
 }
 
 void client_commit(Client *c) {
@@ -3027,7 +3499,7 @@ void client_commit(Client *c) {
 		// 设置动画速度
 		c->animation.passed_frames = 0;
 		c->animation.total_frames =
-			c->animation.duration / output_frame_duration_ms(c);
+			c->animation.duration / output_frame_duration_ms();
 
 		// 标记动画开始
 		c->animation.running = true;
@@ -3230,6 +3702,7 @@ void createlayersurface(struct wl_listener *listener, void *data) {
 
 	l = layer_surface->data = ecalloc(1, sizeof(*l));
 	l->type = LayerShell;
+	LISTEN(&surface->events.map, &l->map, maplayersurfacenotify);
 	LISTEN(&surface->events.commit, &l->surface_commit,
 		   commitlayersurfacenotify);
 	LISTEN(&surface->events.unmap, &l->unmap, unmaplayersurfacenotify);
@@ -3397,6 +3870,14 @@ void createmon(struct wl_listener *listener, void *data) {
 		wlr_output_layout_add_auto(output_layout, wlr_output);
 	else
 		wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
+
+	if (blur) {
+		m->blur = wlr_scene_optimized_blur_create(&scene->tree, 0, 0);
+		wlr_scene_node_set_position(&m->blur->node, m->m.x, m->m.y);
+		wlr_scene_node_reparent(&m->blur->node, layers[LyrBlur]);
+		wlr_scene_optimized_blur_set_size(m->blur, m->m.width, m->m.height);
+		// wlr_scene_node_set_enabled(&m->blur->node, 1);
+	}
 }
 
 void // fix for 0.5
@@ -3545,6 +4026,7 @@ void destroylayersurfacenotify(struct wl_listener *listener, void *data) {
 
 	wl_list_remove(&l->link);
 	wl_list_remove(&l->destroy.link);
+	wl_list_remove(&l->map.link);
 	wl_list_remove(&l->unmap.link);
 	wl_list_remove(&l->surface_commit.link);
 	wlr_scene_node_destroy(&l->scene->node);
@@ -3708,9 +4190,7 @@ void focusclient(Client *c, int lift) {
 		if (c && selmon->prevsel && !selmon->prevsel->isfloating &&
 			(selmon->prevsel->tags & selmon->tagset[selmon->seltags]) &&
 			(c->tags & selmon->tagset[selmon->seltags]) && !c->isfloating &&
-			!c->isfullscreen &&
-			strcmp(selmon->pertag->ltidxs[selmon->pertag->curtag]->name,
-				   "scroller") == 0) {
+			!c->isfullscreen && is_scroller_layout(selmon)) {
 			arrange(selmon, false);
 		} else if (selmon->prevsel) {
 			selmon->prevsel = NULL;
@@ -3731,16 +4211,17 @@ void focusclient(Client *c, int lift) {
 	/* Deactivate old client if focus is changing */
 	if (old_keyboard_focus_surface &&
 		(!c || client_surface(c) != old_keyboard_focus_surface)) {
-		/* If an overlay is focused, don't focus or activate the client,
-		 * but only update its position in fstack to render its border with
-		 * focuscolor and focus it after the overlay is closed. */
+		/* If an exclusive_focus layer is focused, don't focus or activate the
+		 * client, but only update its position in fstack to render its border
+		 * with focuscolor and focus it after the exclusive_focus layer is
+		 * closed. */
 		Client *w = NULL;
 		LayerSurface *l = NULL;
 		int type =
 			toplevel_from_wlr_surface(old_keyboard_focus_surface, &w, &l);
 		if (type == LayerShell && l->scene->node.enabled &&
 			l->layer_surface->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP &&
-			!l->layer_surface->current.keyboard_interactive) {
+			l == exclusive_focus) {
 			return;
 		} else if (w && w == exclusive_focus && client_wants_focus(w)) {
 			return;
@@ -3803,9 +4284,11 @@ void focusmon(const Arg *arg) {
 	}
 	warp_cursor_to_selmon(selmon);
 	c = focustop(selmon);
-	if (!c)
+	if (!c) {
 		selmon->sel = NULL;
-	else
+		wlr_seat_pointer_notify_clear_focus(seat);
+		wlr_seat_keyboard_notify_clear_focus(seat);
+	} else
 		focusclient(c, 1);
 }
 
@@ -3832,6 +4315,8 @@ focusstack(const Arg *arg) {
 	}
 	/* If only one client is visible on selmon, then c == sel */
 	focusclient(c, 1);
+	if (warpcursor)
+		warp_cursor(c);
 }
 
 /* We probably should change the name of this, it sounds like
@@ -3904,7 +4389,13 @@ void incovgaps(const Arg *arg) {
 
 void requestmonstate(struct wl_listener *listener, void *data) {
 	struct wlr_output_event_request_state *event = data;
+	Monitor *m = wl_container_of(listener, m, frame);
+
 	wlr_output_commit_state(event->output, event->state);
+	if (blur) {
+		wlr_scene_node_set_position(&m->blur->node, m->m.x, m->m.y);
+		wlr_scene_optimized_blur_set_size(m->blur, m->m.width, m->m.height);
+	}
 	updatemons(NULL, NULL);
 }
 
@@ -4151,15 +4642,16 @@ static bool scene_node_snapshot(struct wlr_scene_node *node, int lx, int ly,
 
 	struct wlr_scene_node *snapshot_node = NULL;
 	switch (node->type) {
-	case WLR_SCENE_NODE_TREE:;
+	case WLR_SCENE_NODE_TREE: {
 		struct wlr_scene_tree *scene_tree = wlr_scene_tree_from_node(node);
+
 		struct wlr_scene_node *child;
 		wl_list_for_each(child, &scene_tree->children, link) {
 			scene_node_snapshot(child, lx, ly, snapshot_tree);
 		}
 		break;
-	case WLR_SCENE_NODE_RECT:;
-
+	}
+	case WLR_SCENE_NODE_RECT: {
 		struct wlr_scene_rect *scene_rect = wlr_scene_rect_from_node(node);
 
 		struct wlr_scene_rect *snapshot_rect =
@@ -4169,10 +4661,20 @@ static bool scene_node_snapshot(struct wlr_scene_node *node, int lx, int ly,
 		if (snapshot_rect == NULL) {
 			return false;
 		}
+
+		wlr_scene_rect_set_clipped_region(scene_rect,
+										  snapshot_rect->clipped_region);
+		wlr_scene_rect_set_backdrop_blur(scene_rect, false);
+		// wlr_scene_rect_set_backdrop_blur_optimized(
+		// 	scene_rect, snapshot_rect->backdrop_blur_optimized);
+		wlr_scene_rect_set_corner_radius(
+			scene_rect, snapshot_rect->corner_radius, snapshot_rect->corners);
+		wlr_scene_rect_set_color(scene_rect, snapshot_rect->color);
+
 		snapshot_node = &snapshot_rect->node;
 		break;
-	case WLR_SCENE_NODE_BUFFER:;
-
+	}
+	case WLR_SCENE_NODE_BUFFER: {
 		struct wlr_scene_buffer *scene_buffer =
 			wlr_scene_buffer_from_node(node);
 
@@ -4197,6 +4699,15 @@ static bool scene_node_snapshot(struct wlr_scene_node *node, int lx, int ly,
 
 		// Effects
 		wlr_scene_buffer_set_opacity(snapshot_buffer, scene_buffer->opacity);
+		wlr_scene_buffer_set_corner_radius(snapshot_buffer,
+										   scene_buffer->corner_radius,
+										   scene_buffer->corners);
+
+		// wlr_scene_buffer_set_backdrop_blur_optimized(
+		// 	snapshot_buffer, scene_buffer->backdrop_blur_optimized);
+		// wlr_scene_buffer_set_backdrop_blur_ignore_transparent(
+		// 	snapshot_buffer, scene_buffer->backdrop_blur_ignore_transparent);
+		wlr_scene_buffer_set_backdrop_blur(snapshot_buffer, false);
 
 		snapshot_buffer->node.data = scene_buffer->node.data;
 
@@ -4209,6 +4720,31 @@ static bool scene_node_snapshot(struct wlr_scene_node *node, int lx, int ly,
 			wlr_scene_buffer_set_buffer(snapshot_buffer, scene_buffer->buffer);
 		}
 		break;
+	}
+	case WLR_SCENE_NODE_SHADOW: {
+		struct wlr_scene_shadow *scene_shadow =
+			wlr_scene_shadow_from_node(node);
+
+		struct wlr_scene_shadow *snapshot_shadow = wlr_scene_shadow_create(
+			snapshot_tree, scene_shadow->width, scene_shadow->height,
+			scene_shadow->corner_radius, scene_shadow->blur_sigma,
+			scene_shadow->color);
+		if (snapshot_shadow == NULL) {
+			return false;
+		}
+		snapshot_node = &snapshot_shadow->node;
+
+		wlr_scene_shadow_set_clipped_region(snapshot_shadow,
+											scene_shadow->clipped_region);
+
+		snapshot_shadow->node.data = scene_shadow->node.data;
+
+		wlr_scene_node_set_enabled(&snapshot_shadow->node, false);
+
+		break;
+	}
+	case WLR_SCENE_NODE_OPTIMIZED_BLUR:
+		return true;
 	}
 
 	if (snapshot_node != NULL) {
@@ -4300,12 +4836,39 @@ void locksession(struct wl_listener *listener, void *data) {
 	wlr_session_lock_v1_send_locked(session_lock);
 }
 
+static void iter_xdg_scene_buffers(struct wlr_scene_buffer *buffer, int sx,
+								   int sy, void *user_data) {
+	Client *c = user_data;
+
+	struct wlr_scene_surface *scene_surface =
+		wlr_scene_surface_try_from_buffer(buffer);
+	if (!scene_surface) {
+		return;
+	}
+
+	struct wlr_surface *surface = scene_surface->surface;
+	/* we dont blur subsurfaces */
+	if (wlr_subsurface_try_from_wlr_surface(surface) != NULL)
+		return;
+
+	if (blur && c) {
+		wlr_scene_buffer_set_backdrop_blur(buffer, true);
+		wlr_scene_buffer_set_backdrop_blur_ignore_transparent(buffer, true);
+		if (blur_optimized) {
+			wlr_scene_buffer_set_backdrop_blur_optimized(buffer, true);
+		} else {
+			wlr_scene_buffer_set_backdrop_blur_optimized(buffer, false);
+		}
+	} else {
+		wlr_scene_buffer_set_backdrop_blur(buffer, false);
+	}
+}
+
 void // old fix to 0.5
 mapnotify(struct wl_listener *listener, void *data) {
 	/* Called when the surface is mapped, or ready to display on-screen. */
 	Client *p = NULL;
 	Client *c = wl_container_of(listener, c, map);
-	int i;
 	/* Create scene tree for this client and its border */
 	c->scene = client_surface(c)->data = wlr_scene_tree_create(layers[LyrTile]);
 	wlr_scene_node_set_enabled(&c->scene->node, c->type != XDGShell);
@@ -4327,7 +4890,7 @@ mapnotify(struct wl_listener *listener, void *data) {
 	/* Handle unmanaged clients first so we can return prior create borders */
 	if (client_is_unmanaged(c)) {
 		/* Unmanaged clients always are floating */
-		wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
+		wlr_scene_node_reparent(&c->scene->node, layers[LyrFS]);
 		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 		if (client_wants_focus(c)) {
 			focusclient(c, 1);
@@ -4342,11 +4905,22 @@ mapnotify(struct wl_listener *listener, void *data) {
 		return;
 	}
 
-	for (i = 0; i < 4; i++) {
-		c->border[i] = wlr_scene_rect_create(
-			c->scene, 0, 0, c->isurgent ? urgentcolor : bordercolor);
-		c->border[i]->node.data = c;
-	}
+	c->border = wlr_scene_rect_create(c->scene, 0, 0,
+									  c->isurgent ? urgentcolor : bordercolor);
+	wlr_scene_node_lower_to_bottom(&c->border->node);
+	wlr_scene_node_set_position(&c->border->node, 0, 0);
+	wlr_scene_rect_set_corner_radius(c->border, border_radius,
+									 border_radius_location_default);
+	wlr_scene_node_set_enabled(&c->border->node, true);
+
+	c->shadow = wlr_scene_shadow_create(c->scene, 0, 0, border_radius,
+										shadows_blur, shadowscolor);
+
+	wlr_scene_node_lower_to_bottom(&c->shadow->node);
+	wlr_scene_node_set_enabled(&c->shadow->node, true);
+
+	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
+								   iter_xdg_scene_buffers, c);
 
 	/* Initialize client geometry with room for border */
 	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT |
@@ -4373,19 +4947,16 @@ mapnotify(struct wl_listener *listener, void *data) {
 	c->is_open_animation = true;
 	c->drag_to_tile = false;
 	c->fake_no_border = false;
+	c->focused_opacity = focused_opacity;
+	c->unfocused_opacity = unfocused_opacity;
 	c->nofadein = 0;
 	c->nofadeout = 0;
 	c->no_force_center = 0;
 
-	if (new_is_master && selmon &&
-		strcmp(selmon->pertag->ltidxs[selmon->pertag->curtag]->name,
-			   "scroller") != 0)
+	if (new_is_master && selmon && !is_scroller_layout(selmon))
 		// tile at the top
 		wl_list_insert(&clients, &c->link); // 新窗口是master,头部入栈
-	else if (selmon &&
-			 strcmp(selmon->pertag->ltidxs[selmon->pertag->curtag]->name,
-					"scroller") == 0 &&
-			 center_select(selmon)) {
+	else if (selmon && is_scroller_layout(selmon) && center_select(selmon)) {
 		Client *at_client = center_select(selmon);
 		at_client->link.next->prev = &c->link;
 		c->link.prev = &at_client->link;
@@ -4592,7 +5163,9 @@ void motionnotify(unsigned int time, struct wlr_input_device *device, double dx,
 
 	if (c && c->mon && !c->animation.running &&
 		(!(c->geom.x + c->geom.width > c->mon->m.x + c->mon->m.width ||
-		   c->geom.x < c->mon->m.x) ||
+		   c->geom.x < c->mon->m.x ||
+		   c->geom.y + c->geom.height > c->mon->m.y + c->mon->m.height ||
+		   c->geom.y < c->mon->m.y) ||
 		 !ISTILED(c))) {
 		scroller_focus_lock = 0;
 	}
@@ -4601,12 +5174,14 @@ void motionnotify(unsigned int time, struct wlr_input_device *device, double dx,
 	if (!scroller_focus_lock ||
 		!(c && c->mon &&
 		  (c->geom.x + c->geom.width > c->mon->m.x + c->mon->m.width ||
-		   c->geom.x < c->mon->m.x))) {
-		if (c && c->mon &&
-			strcmp(c->mon->pertag->ltidxs[c->mon->pertag->curtag]->name,
-				   "scroller") == 0 &&
+		   c->geom.x < c->mon->m.x ||
+		   c->geom.y + c->geom.height > c->mon->m.y + c->mon->m.height ||
+		   c->geom.y < c->mon->m.y))) {
+		if (c && c->mon && is_scroller_layout(c->mon) &&
 			(c->geom.x + c->geom.width > c->mon->m.x + c->mon->m.width ||
-			 c->geom.x < c->mon->m.x)) {
+			 c->geom.x < c->mon->m.x ||
+			 c->geom.y + c->geom.height > c->mon->m.y + c->mon->m.height ||
+			 c->geom.y < c->mon->m.y)) {
 			should_lock = true;
 		}
 		pointerfocus(c, surface, sx, sy, time);
@@ -4864,6 +5439,18 @@ void scene_buffer_apply_effect(struct wlr_scene_buffer *buffer, int sx, int sy,
 		}
 	}
 	// TODO: blur set, opacity set
+
+	if (wlr_xdg_popup_try_from_wlr_surface(surface) != NULL)
+		return;
+
+	wlr_scene_buffer_set_corner_radius(buffer, border_radius,
+									   scale_data->corner_location);
+
+	float target_opacity = scale_data->percent + fadein_begin_opacity;
+	if (target_opacity > scale_data->opacity) {
+		target_opacity = scale_data->opacity;
+	}
+	wlr_scene_buffer_set_opacity(buffer, target_opacity);
 }
 
 void snap_scene_buffer_apply_effect(struct wlr_scene_buffer *buffer, int sx,
@@ -4875,13 +5462,21 @@ void snap_scene_buffer_apply_effect(struct wlr_scene_buffer *buffer, int sx,
 
 void buffer_set_effect(Client *c, animationScale data) {
 
-	if (c->iskilling || c->animation.tagouting || c->animation.tagouted ||
+	if (!c || c->iskilling)
+		return;
+
+	if (c->animation.tagouting || c->animation.tagouted ||
 		c->animation.tagining) {
 		data.should_scale = false;
 	}
 
 	if (c == grabc)
 		data.should_scale = false;
+
+	if (c->isfullscreen ||
+		(no_radius_when_single && c->mon && c->mon->visible_clients == 1)) {
+		data.corner_location = CORNER_LOCATION_NONE;
+	}
 
 	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
 								   scene_buffer_apply_effect, &data);
@@ -4892,25 +5487,24 @@ void client_set_opacity(Client *c, double opacity) {
 								   scene_buffer_apply_opacity, &opacity);
 }
 
-void client_handle_opacity(Client *c) {
-	if (!c || !c->mon || !client_surface(c)->mapped)
-		return;
-
-	double opacity = c->isfullscreen || c->ismaxmizescreen ? 1.0
-					 : c == selmon->sel					   ? 0.8
-														   : 0.5;
-
-	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
-								   scene_buffer_apply_opacity, &opacity);
-}
-
 void rendermon(struct wl_listener *listener, void *data) {
 	Monitor *m = wl_container_of(listener, m, frame);
 	Client *c, *tmp;
 	struct wlr_output_state pending = {0};
+	LayerSurface *l, *tmpl;
+	int i;
+	struct wl_list *layer_list;
 
 	struct timespec now;
 	bool need_more_frames = false;
+
+	for (i = 0; i < LENGTH(m->layers); i++) {
+		layer_list = &m->layers[i];
+		// Draw frames for all layer
+		wl_list_for_each_safe(l, tmpl, layer_list, link) {
+			need_more_frames = layer_draw_frame(l) || need_more_frames;
+		}
+	}
 
 	// Draw frames for all clients
 	wl_list_for_each(c, &clients, link) {
@@ -4919,6 +5513,10 @@ void rendermon(struct wl_listener *listener, void *data) {
 
 	wl_list_for_each_safe(c, tmp, &fadeout_clients, fadeout_link) {
 		need_more_frames = client_draw_fadeout_frame(c) || need_more_frames;
+	}
+
+	wl_list_for_each_safe(l, tmpl, &fadeout_layers, fadeout_link) {
+		need_more_frames = layer_draw_fadeout_frame(l) || need_more_frames;
 	}
 
 	wlr_scene_output_commit(m->scene_output, NULL);
@@ -5037,9 +5635,7 @@ int is_special_animaiton_rule(Client *c) {
 		}
 	}
 
-	if (strcmp(selmon->pertag->ltidxs[selmon->pertag->curtag]->name,
-			   "scroller") == 0 &&
-		!c->isfloating) {
+	if (is_scroller_layout(selmon) && !c->isfloating) {
 		return DOWN;
 	} else if (visible_client_number < 2 && !c->isfloating) {
 		return DOWN;
@@ -5052,7 +5648,60 @@ int is_special_animaiton_rule(Client *c) {
 	}
 }
 
-void set_open_animaiton(Client *c, struct wlr_box geo) {
+void set_layer_open_animaiton(LayerSurface *l, struct wlr_box geo) {
+	int slide_direction;
+	int horizontal, horizontal_value;
+	int vertical, vertical_value;
+	int center_x, center_y;
+
+	if (!l || !l->mapped)
+		return;
+
+	center_x = l->geom.x + l->geom.width / 2;
+	center_y = l->geom.y + l->geom.height / 2;
+	horizontal =
+		l->mon->w.x + l->mon->w.width - center_x < center_x - l->mon->w.x
+			? RIGHT
+			: LEFT;
+	horizontal_value = horizontal == LEFT
+						   ? center_x - l->mon->w.x
+						   : l->mon->w.x + l->mon->w.width - center_x;
+	vertical =
+		l->mon->w.y + l->mon->w.height - center_y < center_y - l->mon->w.y
+			? DOWN
+			: UP;
+	vertical_value = vertical == UP ? center_y - l->mon->w.y
+									: l->mon->w.y + l->mon->w.height - center_y;
+	slide_direction = horizontal_value < vertical_value ? horizontal : vertical;
+
+	l->animainit_geom.width = l->geom.width;
+	l->animainit_geom.height = l->geom.height;
+	switch (slide_direction) {
+	case UP:
+		l->animainit_geom.x = l->geom.x;
+		l->animainit_geom.y = l->mon->m.y - l->geom.height;
+		break;
+	case DOWN:
+		l->animainit_geom.x = l->geom.x;
+		l->animainit_geom.y =
+			l->geom.y + l->mon->m.height - (l->geom.y - l->mon->m.y);
+		break;
+	case LEFT:
+		l->animainit_geom.x = l->mon->m.x - l->geom.width;
+		l->animainit_geom.y = l->geom.y;
+		break;
+	case RIGHT:
+		l->animainit_geom.x =
+			l->geom.x + l->mon->m.width - (l->geom.x - l->mon->m.x);
+		l->animainit_geom.y = l->geom.y;
+		break;
+	default:
+		l->animainit_geom.x = l->geom.x;
+		l->animainit_geom.y = 0 - l->geom.height;
+	}
+}
+
+void set_client_open_animaiton(Client *c, struct wlr_box geo) {
 	int slide_direction;
 	int horizontal, horizontal_value;
 	int vertical, vertical_value;
@@ -5138,9 +5787,7 @@ void resize(Client *c, struct wlr_box geo, int interact) {
 	// oldgeom = c->geom;
 	bbox = (interact || c->isfloating || c->isfullscreen) ? &sgeom : &c->mon->w;
 
-	if (strcmp(c->mon->pertag->ltidxs[c->mon->pertag->curtag]->name,
-			   "scroller") == 0 &&
-		(!c->isfloating || c == grabc)) {
+	if (is_scroller_layout(c->mon) && (!c->isfloating || c == grabc)) {
 		c->geom = geo;
 		c->geom.width = MAX(1 + 2 * (int)c->bw, c->geom.width);
 		c->geom.height = MAX(1 + 2 * (int)c->bw, c->geom.height);
@@ -5156,7 +5803,6 @@ void resize(Client *c, struct wlr_box geo, int interact) {
 
 	if (!c->is_open_animation) {
 		c->animation.begin_fade_in = false;
-		client_set_opacity(c, 1);
 	}
 
 	if (c->animation.action == OPEN && !c->animation.tagining &&
@@ -5183,7 +5829,7 @@ void resize(Client *c, struct wlr_box geo, int interact) {
 		c->animainit_geom.height = c->animation.current.height;
 		c->animainit_geom.width = c->animation.current.width;
 	} else if (c->is_open_animation) {
-		set_open_animaiton(c, c->geom);
+		set_client_open_animaiton(c, c->geom);
 	} else {
 		c->animainit_geom = c->animation.current;
 	}
@@ -5202,12 +5848,13 @@ void resize(Client *c, struct wlr_box geo, int interact) {
 		c->animainit_geom = c->current = c->pending = c->animation.current =
 			c->geom;
 		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
+
+		client_draw_shadow(c);
 		apply_border(c);
 		client_get_clip(c, &clip);
 		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 		return;
 	}
-
 	// 如果不是工作区切换时划出去的窗口，就让动画的结束位置，就是上面的真实位置和大小
 	// c->pending 决定动画的终点，一般在其他调用resize的函数的附近设置了
 	if (!c->animation.tagouting && !c->iskilling) {
@@ -5410,8 +6057,6 @@ void setmaxmizescreen(Client *c, int maxmizescreen) {
 
 	c->ismaxmizescreen = maxmizescreen;
 
-	// c->bw = fullscreen ? 0 : borderpx;
-	// client_set_fullscreen(c, maxmizescreen);
 	wlr_scene_node_reparent(&c->scene->node, layers[maxmizescreen	? LyrTile
 													: c->isfloating ? LyrFloat
 																	: LyrTile]);
@@ -5435,7 +6080,7 @@ void setmaxmizescreen(Client *c, int maxmizescreen) {
 		c->bw = c->isnoborder ? 0 : borderpx;
 		c->ismaxmizescreen = 0;
 		c->isfullscreen = 0;
-		client_set_fullscreen(c, false);
+		setfullscreen(c, false);
 		if (c->isfloating)
 			setfloating(c, 1);
 		arrange(c->mon, false);
@@ -5464,7 +6109,7 @@ void setfullscreen(Client *c, int fullscreen) // 用自定义全屏代理自带�
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 	} else {
 		wlr_scene_node_reparent(&c->scene->node,
-								layers[fullscreen	   ? LyrFloat
+								layers[fullscreen	   ? LyrFS
 									   : c->isfloating ? LyrFloat
 													   : LyrTile]);
 	}
@@ -6053,7 +6698,7 @@ void setup(void) {
 	wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
 
 	/* Create a renderer with the default implementation */
-	if (!(drw = wlr_renderer_autocreate(backend)))
+	if (!(drw = fx_renderer_create(backend)))
 		die("couldn't create renderer");
 
 	wl_signal_add(&drw->events.lost, &gpu_reset);
@@ -6131,6 +6776,7 @@ void setup(void) {
 	wl_list_init(&clients);
 	wl_list_init(&fstack);
 	wl_list_init(&fadeout_clients);
+	wl_list_init(&fadeout_layers);
 
 	idle_notifier = wlr_idle_notifier_v1_create(dpy);
 
@@ -6244,6 +6890,11 @@ void setup(void) {
 	output_mgr = wlr_output_manager_v1_create(dpy);
 	wl_signal_add(&output_mgr->events.apply, &output_mgr_apply);
 	wl_signal_add(&output_mgr->events.test, &output_mgr_test);
+
+	// blur
+	wlr_scene_set_blur_data(scene, blur_params.num_passes, blur_params.radius,
+							blur_params.noise, blur_params.brightness,
+							blur_params.contrast, blur_params.saturation);
 
 	/* create text_input-, and input_method-protocol relevant globals */
 	input_method_manager = wlr_input_method_manager_v2_create(dpy);
@@ -6745,6 +7396,9 @@ void unmaplayersurfacenotify(struct wl_listener *listener, void *data) {
 	LayerSurface *l = wl_container_of(listener, l, unmap);
 
 	l->mapped = 0;
+
+	init_fadeout_layers(l);
+
 	wlr_scene_node_set_enabled(&l->scene->node, false);
 	if (l == exclusive_focus)
 		exclusive_focus = NULL;
@@ -6753,6 +7407,62 @@ void unmaplayersurfacenotify(struct wl_listener *listener, void *data) {
 	if (l->layer_surface->surface == seat->keyboard_state.focused_surface)
 		focusclient(focustop(selmon), 1);
 	motionnotify(0, NULL, 0, 0, 0, 0);
+}
+
+void init_fadeout_layers(LayerSurface *l) {
+
+	if (!layer_animations || l->noanim) {
+		return;
+	}
+
+	if (!l->mon)
+		return;
+
+	if (!l->scene) {
+		return;
+	}
+
+	if (l->layer_surface->current.layer == ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM ||
+		l->layer_surface->current.layer == ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND)
+		return;
+
+	LayerSurface *fadeout_layer = ecalloc(1, sizeof(*fadeout_layer));
+
+	wlr_scene_node_set_enabled(&l->scene->node, true);
+	fadeout_layer->scene =
+		wlr_scene_tree_snapshot(&l->scene->node, layers[LyrFadeOut]);
+	wlr_scene_node_set_enabled(&l->scene->node, false);
+
+	if (!fadeout_layer->scene) {
+		free(fadeout_layer);
+		return;
+	}
+
+	fadeout_layer->animation.duration = animation_duration_close;
+	fadeout_layer->geom = fadeout_layer->current =
+		fadeout_layer->animainit_geom = fadeout_layer->animation.initial =
+			l->animation.current;
+	fadeout_layer->mon = l->mon;
+	fadeout_layer->animation.action = CLOSE;
+
+	// 这里snap节点的坐标设置是使用的相对坐标，所以不能加上原来坐标
+	// 这跟普通node有区别
+
+	fadeout_layer->animation.initial.x = 0;
+	fadeout_layer->animation.initial.y = 0;
+
+	fadeout_layer->current.y =
+		l->geom.y + l->geom.height / 2 > l->mon->m.y + l->mon->m.height / 2
+			? l->mon->m.height -
+				  (l->animation.current.y - l->mon->m.y) // down out
+			: l->mon->m.y - l->geom.height;				 // up out
+	fadeout_layer->current.x = 0;						 // x无偏差，垂直划出
+
+	fadeout_layer->animation.passed_frames = 0;
+	fadeout_layer->animation.total_frames =
+		fadeout_layer->animation.duration / output_frame_duration_ms();
+	wlr_scene_node_set_enabled(&fadeout_layer->scene->node, true);
+	wl_list_insert(&fadeout_layers, &fadeout_layer->fadeout_link);
 }
 
 void init_fadeout_client(Client *c) {
@@ -6824,7 +7534,7 @@ void init_fadeout_client(Client *c) {
 
 	fadeout_cient->animation.passed_frames = 0;
 	fadeout_cient->animation.total_frames =
-		fadeout_cient->animation.duration / output_frame_duration_ms(c);
+		fadeout_cient->animation.duration / output_frame_duration_ms();
 	wlr_scene_node_set_enabled(&fadeout_cient->scene->node, true);
 	wl_list_insert(&fadeout_clients, &fadeout_cient->fadeout_link);
 }
@@ -6997,6 +7707,11 @@ void updatemons(struct wl_listener *listener, void *data) {
 
 		// wlr_scene_node_set_position(&m->fullscreen_bg->node, m->m.x, m->m.y);
 		// wlr_scene_rect_set_size(m->fullscreen_bg, m->m.width, m->m.height);
+
+		if (blur && m->blur) {
+			wlr_scene_node_set_position(&m->blur->node, m->m.x, m->m.y);
+			wlr_scene_optimized_blur_set_size(m->blur, m->m.width, m->m.height);
+		}
 
 		if (m->lock_surface) {
 			struct wlr_scene_tree *scene_tree = m->lock_surface->surface->data;
@@ -7329,10 +8044,12 @@ void warp_cursor(const Client *c) {
 	}
 }
 
-void warp_cursor_to_selmon(const Monitor *m) {
+void warp_cursor_to_selmon(Monitor *m) {
 
 	wlr_cursor_warp_closest(cursor, NULL, m->w.x + m->w.width / 2.0,
 							m->w.y + m->w.height / 2.0);
+	wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+	handlecursoractivity();
 }
 
 void virtualpointer(struct wl_listener *listener, void *data) {
@@ -7542,7 +8259,7 @@ void smartmovewin(const Arg *arg) {
 		}
 
 		ny = tar == -99999 ? ny : tar;
-		ny = MAX(ny, c->mon->w.y);
+		ny = MAX(ny, c->mon->w.y + c->mon->gappov);
 		break;
 	case DOWN:
 		tar = 99999;
@@ -7561,7 +8278,8 @@ void smartmovewin(const Arg *arg) {
 			};
 		}
 		ny = tar == 99999 ? ny : tar;
-		ny = MIN(ny, c->mon->w.y + c->mon->w.height - c->geom.height);
+		ny = MIN(ny, c->mon->w.y + c->mon->w.height - c->geom.height -
+						 c->mon->gappov);
 		break;
 	case LEFT:
 		tar = -99999;
@@ -7581,7 +8299,7 @@ void smartmovewin(const Arg *arg) {
 		}
 
 		nx = tar == -99999 ? nx : tar;
-		nx = MAX(nx, c->mon->w.x);
+		nx = MAX(nx, c->mon->w.x + c->mon->gappoh);
 		break;
 	case RIGHT:
 		tar = 99999;
@@ -7599,7 +8317,8 @@ void smartmovewin(const Arg *arg) {
 			};
 		}
 		nx = tar == 99999 ? nx : tar;
-		nx = MIN(nx, c->mon->w.x + c->mon->w.width - c->geom.width);
+		nx = MIN(nx, c->mon->w.x + c->mon->w.width - c->geom.width -
+						 c->mon->gappoh);
 		break;
 	}
 

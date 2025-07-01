@@ -11,6 +11,7 @@
 char *animation_type_open = "slide";	  // 是否启用动画 //slide,zoom
 char *animation_type_close = "slide";	  // 是否启用动画 //slide,zoom
 int animations = 1;						  // 是否启用动画
+int layer_animations = 0;				  // 是否启用layer动画
 int tag_animation_direction = HORIZONTAL; // 标签动画方向
 int animation_fade_in = 1;				  // Enable animation fade in
 int animation_fade_out = 1;				  // Enable animation fade out
@@ -56,6 +57,7 @@ int scroller_prefer_center = 0;
 int focus_cross_monitor = 0;
 int focus_cross_tag = 0;
 int no_border_when_single = 0;
+int no_radius_when_single = 0;
 int snap_distance = 30;
 int enable_floating_snap = 0;
 int drag_tile_to_tile = 0;
@@ -88,19 +90,6 @@ float fullscreen_bg[] = {0.1, 0.1, 0.1, 1.0};
 int warpcursor = 1;			  /* Warp cursor to focused client */
 int xwayland_persistence = 1; /* xwayland persistence */
 int syncobj_enable = 0;
-
-/* layout(s) */
-Layout overviewlayout = {"󰃇", overview, "overview"};
-
-Layout layouts[] = {
-	// 最少两个,不能删除少于两个
-	/* symbol     arrange function   name */
-	{"S", scroller, "scroller"}, // 滚动布局
-	{"T", tile, "tile"},		 // 堆栈布局
-	{"G", grid, "grid"},		 {"M", monocle, "monocle"},
-	{"D", dwindle, "dwindle"},	 {"P", spiral, "spiral"},
-	{"K", deck, "deck"},
-};
 
 /* keyboard */
 
@@ -180,3 +169,29 @@ enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TAP_MAP_LRM;
 static const char *tags[] = {
 	"1", "2", "3", "4", "5", "6", "7", "8", "9",
 };
+
+float focused_opacity = 1.0;
+float unfocused_opacity = 1.0;
+
+int border_radius = 0;
+int border_radius_location_default = CORNER_LOCATION_ALL;
+int blur = 0;
+int blur_layer = 0;
+int blur_optimized = 1;
+
+struct blur_data blur_params;
+
+int blur_params_num_passes = 1;
+int blur_params_radius = 5;
+float blur_params_noise = 0.02;
+float blur_params_brightness = 0.9;
+float blur_params_contrast = 0.9;
+float blur_params_saturation = 1.2;
+
+int shadows = 0;
+unsigned int shadows_size = 10;
+double shadows_blur = 15;
+int shadows_position_x = 0;
+int shadows_position_y = 0;
+float shadowscolor[] = COLOR(0x000000ff);
+;
