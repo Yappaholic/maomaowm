@@ -1165,7 +1165,7 @@ void layer_draw_shadow(LayerSurface *l) {
 	if (!l->mapped || !l->shadow)
 		return;
 
-	if (!shadows) {
+	if (!shadows || !layer_shadows || l->noshadow) {
 		wlr_scene_shadow_set_size(l->shadow, 0, 0);
 		return;
 	}
@@ -3334,11 +3334,12 @@ void maplayersurfacenotify(struct wl_listener *listener, void *data) {
 	int ji;
 
 	LayerSurface *l = wl_container_of(listener, l, map);
+	struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
+
 	l->mapped = 1;
 
 	if (!l->mon)
 		return;
-	struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
 	strncpy(l->mon->last_surface_ws_name, layer_surface->namespace,
 			sizeof(l->mon->last_surface_ws_name) - 1); // 最多拷贝255个字符
 	l->mon->last_surface_ws_name[sizeof(l->mon->last_surface_ws_name) - 1] =
@@ -3372,7 +3373,9 @@ void maplayersurfacenotify(struct wl_listener *listener, void *data) {
 		}
 	}
 
-	if (shadows && layer_shadows && !l->noshadow) {
+	if (layer_surface->current.exclusive_zone == 0 &&
+		layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
+		layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND) {
 		l->shadow = wlr_scene_shadow_create(l->scene, 0, 0, border_radius,
 											shadows_blur, shadowscolor);
 		wlr_scene_node_lower_to_bottom(&l->shadow->node);
