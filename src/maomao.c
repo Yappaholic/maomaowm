@@ -1287,15 +1287,24 @@ void apply_border(Client *c) {
 	// 一但在GEZERO如果使用无符号，那么其他数据也会转换为无符号导致没有负数出错
 	int bw = (int)c->bw;
 
-	int right_offset =
-		GEZERO(c->animation.current.x + c->animation.current.width -
-			   c->mon->m.x - c->mon->m.width);
-	int bottom_offset =
-		GEZERO(c->animation.current.y + c->animation.current.height -
-			   c->mon->m.y - c->mon->m.height);
+	int right_offset, bottom_offset, left_offset, top_offset;
 
-	int left_offset = GEZERO(c->mon->m.x - c->animation.current.x);
-	int top_offset = GEZERO(c->mon->m.y - c->animation.current.y);
+	if (c == grabc || c->animation.action == MOVE) {
+		right_offset = 0;
+		bottom_offset = 0;
+		left_offset = 0;
+		top_offset = 0;
+	} else {
+		right_offset =
+			GEZERO(c->animation.current.x + c->animation.current.width -
+				   c->mon->m.x - c->mon->m.width);
+		bottom_offset =
+			GEZERO(c->animation.current.y + c->animation.current.height -
+				   c->mon->m.y - c->mon->m.height);
+
+		left_offset = GEZERO(c->mon->m.x - c->animation.current.x);
+		top_offset = GEZERO(c->mon->m.y - c->animation.current.y);
+	}
 
 	int inner_surface_width = GEZERO(clip_box.width - 2 * bw);
 	int inner_surface_height = GEZERO(clip_box.height - 2 * bw);
