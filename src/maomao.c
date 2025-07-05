@@ -1252,9 +1252,39 @@ void client_draw_shadow(Client *c) {
 		.corners = border_radius_location_default,
 	};
 
-	wlr_scene_node_set_position(&c->shadow->node, shadow_box.x, shadow_box.y);
+	struct wlr_box absolute_shadow_box = {
+		.x = shadow_box.x + c->animation.current.x,
+		.y = shadow_box.y + c->animation.current.y,
+		.width = shadow_box.width,
+		.height = shadow_box.height,
+	};
 
-	wlr_scene_shadow_set_size(c->shadow, shadow_box.width, shadow_box.height);
+	int right_offset, bottom_offset, left_offset, top_offset;
+
+	if (c == grabc || c->animation.action == MOVE) {
+		right_offset = 0;
+		bottom_offset = 0;
+		left_offset = 0;
+		top_offset = 0;
+	} else {
+		right_offset =
+			GEZERO(absolute_shadow_box.x + absolute_shadow_box.width -
+				   c->mon->m.x - c->mon->m.width);
+		bottom_offset =
+			GEZERO(absolute_shadow_box.y + absolute_shadow_box.height -
+				   c->mon->m.y - c->mon->m.height);
+
+		left_offset = GEZERO(c->mon->m.x - absolute_shadow_box.x);
+		top_offset = GEZERO(c->mon->m.y - absolute_shadow_box.y);
+	}
+
+	wlr_scene_node_set_position(&c->shadow->node,
+								GEZERO(shadow_box.x - left_offset),
+								GEZERO(shadow_box.y - top_offset));
+
+	wlr_scene_shadow_set_size(
+		c->shadow, GEZERO(shadow_box.width - left_offset - right_offset),
+		GEZERO(shadow_box.height - top_offset - bottom_offset));
 	wlr_scene_shadow_set_clipped_region(c->shadow, clipped_region);
 }
 
