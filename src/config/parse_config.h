@@ -205,6 +205,7 @@ typedef struct {
 	int middle_button_emulation;
 	unsigned int accel_profile;
 	double accel_speed;
+	int tablet_lock_to_window;
 	unsigned int scroll_method;
 	unsigned int scroll_button;
 	unsigned int click_method;
@@ -1178,6 +1179,8 @@ void parse_config_line(Config *config, const char *line) {
 		config->accel_profile = atoi(value);
 	} else if (strcmp(key, "accel_speed") == 0) {
 		config->accel_speed = atof(value);
+	} else if (strcmp(key, "tablet_lock_to_window") == 0) {
+		config->tablet_lock_to_window = atoi(value);
 	} else if (strcmp(key, "scroll_method") == 0) {
 		config->scroll_method = atoi(value);
 	} else if (strcmp(key, "scroll_button") == 0) {
@@ -2198,6 +2201,9 @@ void override_config(void) {
 	send_events_mode = CLAMP_INT(config.send_events_mode, 0, 2);
 	button_map = CLAMP_INT(config.button_map, 0, 1);
 
+	// 手写板设置
+	tablet_lock_to_window = CLAMP_INT(config.tablet_lock_to_window, 0, 1);
+
 	// 外观设置
 	gappih = CLAMP_INT(config.gappih, 0, 1000);
 	gappiv = CLAMP_INT(config.gappiv, 0, 1000);
@@ -2345,6 +2351,7 @@ void set_value_default() {
 	config.middle_button_emulation = middle_button_emulation;
 	config.accel_profile = accel_profile;
 	config.accel_speed = accel_speed;
+	config.tablet_lock_to_window = tablet_lock_to_window;
 	config.scroll_method = scroll_method;
 	config.scroll_button = scroll_button;
 	config.click_method = click_method;

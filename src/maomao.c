@@ -4547,6 +4547,12 @@ void inputdevice(struct wl_listener *listener, void *data) {
 	case WLR_INPUT_DEVICE_POINTER:
 		createpointer(wlr_pointer_from_input_device(device));
 		break;
+	case WLR_INPUT_DEVICE_TABLET:
+		createtablet(device);
+		break;
+	case WLR_INPUT_DEVICE_TABLET_PAD:
+		tablet_pad = wlr_tablet_pad_create(tablet_mgr, seat, device);
+		break;
 	default:
 		/* TODO handle other input device types */
 		break;
@@ -6825,6 +6831,7 @@ void setup(void) {
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
 	pointer_manager = wlr_relative_pointer_manager_v1_create(dpy);
+	tablet_mgr = wlr_tablet_v2_create(dpy);
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
 	 * backend based on the current environment, such as opening an X11 window
@@ -6998,7 +7005,12 @@ void setup(void) {
 	wl_signal_add(&cursor->events.axis, &cursor_axis);
 	wl_signal_add(&cursor->events.frame, &cursor_frame);
 
-	// 这两句代码会造成obs窗口里的鼠标光标消失,不知道注释有什么影响
+	wl_signal_add(&cursor->events.tablet_tool_proximity,
+				  &tablet_tool_proximity);
+	wl_signal_add(&cursor->events.tablet_tool_axis, &tablet_tool_axis);
+	wl_signal_add(&cursor->events.tablet_tool_button, &tablet_tool_button);
+	wl_signal_add(&cursor->events.tablet_tool_tip, &tablet_tool_tip);
+
 	cursor_shape_mgr = wlr_cursor_shape_manager_v1_create(dpy, 1);
 	wl_signal_add(&cursor_shape_mgr->events.request_set_shape,
 				  &request_set_cursor_shape);
