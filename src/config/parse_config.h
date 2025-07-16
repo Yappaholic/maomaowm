@@ -42,6 +42,8 @@ typedef struct {
 	float scroller_proportion;
 	const char *animation_type_open;
 	const char *animation_type_close;
+	const char *layer_animation_type_open;
+	const char *layer_animation_type_close;
 	int isnoborder;
 	int isopensilent;
 	int isnamedscratchpad;
@@ -125,6 +127,8 @@ typedef struct {
 
 typedef struct {
 	char *layer_name; // 布局名称
+	char *animation_type_open;
+	char *animation_type_close;
 	int noblur;
 	int noanim;
 	int noshadow;
@@ -135,10 +139,13 @@ typedef struct {
 	int layer_animations;
 	char animation_type_open[10];
 	char animation_type_close[10];
+	char layer_animation_type_open[10];
+	char layer_animation_type_close[10];
 	int animation_fade_in;
 	int animation_fade_out;
 	int tag_animation_direction;
 	float zoom_initial_ratio;
+	float zoom_end_ratio;
 	float fadein_begin_opacity;
 	float fadeout_begin_opacity;
 	uint32_t animation_duration_move;
@@ -195,6 +202,7 @@ typedef struct {
 	unsigned int numlockon;
 
 	/* Trackpad */
+	int disable_trackpad;
 	int tap_to_click;
 	int tap_and_drag;
 	int drag_lock;
@@ -859,6 +867,14 @@ void parse_config_line(Config *config, const char *line) {
 		snprintf(config->animation_type_close,
 				 sizeof(config->animation_type_close), "%.9s",
 				 value); // string limit to 9 char
+	} else if (strcmp(key, "layer_animation_type_open") == 0) {
+		snprintf(config->layer_animation_type_open,
+				 sizeof(config->layer_animation_type_open), "%.9s",
+				 value); // string limit to 9 char
+	} else if (strcmp(key, "layer_animation_type_close") == 0) {
+		snprintf(config->layer_animation_type_close,
+				 sizeof(config->layer_animation_type_close), "%.9s",
+				 value); // string limit to 9 char
 	} else if (strcmp(key, "animation_fade_in") == 0) {
 		config->animation_fade_in = atoi(value);
 	} else if (strcmp(key, "animation_fade_out") == 0) {
@@ -867,6 +883,8 @@ void parse_config_line(Config *config, const char *line) {
 		config->tag_animation_direction = atoi(value);
 	} else if (strcmp(key, "zoom_initial_ratio") == 0) {
 		config->zoom_initial_ratio = atof(value);
+	} else if (strcmp(key, "zoom_end_ratio") == 0) {
+		config->zoom_end_ratio = atof(value);
 	} else if (strcmp(key, "fadein_begin_opacity") == 0) {
 		config->fadein_begin_opacity = atof(value);
 	} else if (strcmp(key, "fadeout_begin_opacity") == 0) {
@@ -1155,6 +1173,8 @@ void parse_config_line(Config *config, const char *line) {
 		config->repeat_rate = atoi(value);
 	} else if (strcmp(key, "repeat_delay") == 0) {
 		config->repeat_delay = atoi(value);
+	} else if (strcmp(key, "disable_trackpad") == 0) {
+		config->disable_trackpad = atoi(value);
 	} else if (strcmp(key, "tap_to_click") == 0) {
 		config->tap_to_click = atoi(value);
 	} else if (strcmp(key, "tap_and_drag") == 0) {
@@ -1336,6 +1356,8 @@ void parse_config_line(Config *config, const char *line) {
 
 		// 设置默认值
 		rule->layer_name = NULL;
+		rule->animation_type_open = NULL;
+		rule->animation_type_close = NULL;
 		rule->noblur = 0;
 		rule->noanim = 0;
 		rule->noshadow = 0;
@@ -1353,6 +1375,10 @@ void parse_config_line(Config *config, const char *line) {
 
 				if (strcmp(key, "layer_name") == 0) {
 					rule->layer_name = strdup(val);
+				} else if (strcmp(key, "animation_type_open") == 0) {
+					rule->animation_type_open = strdup(val);
+				} else if (strcmp(key, "animation_type_close") == 0) {
+					rule->animation_type_close = strdup(val);
 				} else if (strcmp(key, "noblur") == 0) {
 					rule->noblur = CLAMP_INT(atoi(val), 0, 1);
 				} else if (strcmp(key, "noanim") == 0) {
@@ -2056,7 +2082,12 @@ void free_config(void) {
 	// 释放 layer_rules
 	if (config.layer_rules) {
 		for (int i = 0; i < config.layer_rules_count; i++) {
-			free((void *)config.layer_rules[i].layer_name);
+			if (config.layer_rules[i].layer_name)
+				free((void *)config.layer_rules[i].layer_name);
+			if (config.layer_rules[i].animation_type_open)
+				free((void *)config.layer_rules[i].animation_type_open);
+			if (config.layer_rules[i].animation_type_close)
+				free((void *)config.layer_rules[i].animation_type_close);
 		}
 		free(config.layer_rules);
 		config.layer_rules = NULL;
@@ -2114,6 +2145,7 @@ void override_config(void) {
 	animation_fade_in = CLAMP_INT(config.animation_fade_in, 0, 1);
 	animation_fade_out = CLAMP_INT(config.animation_fade_out, 0, 1);
 	zoom_initial_ratio = CLAMP_FLOAT(config.zoom_initial_ratio, 0.1f, 1.0f);
+	zoom_end_ratio = CLAMP_FLOAT(config.zoom_end_ratio, 0.1f, 1.0f);
 	fadein_begin_opacity = CLAMP_FLOAT(config.fadein_begin_opacity, 0.0f, 1.0f);
 	fadeout_begin_opacity =
 		CLAMP_FLOAT(config.fadeout_begin_opacity, 0.0f, 1.0f);
@@ -2121,6 +2153,10 @@ void override_config(void) {
 	// 打开关闭动画类型
 	animation_type_open = config.animation_type_open;
 	animation_type_close = config.animation_type_close;
+
+	// layer打开关闭动画类型
+	layer_animation_type_open = config.layer_animation_type_open;
+	layer_animation_type_close = config.layer_animation_type_close;
 
 	// 动画时间限制在合理范围(1-50000ms)
 	animation_duration_move =
@@ -2181,6 +2217,7 @@ void override_config(void) {
 	numlockon = CLAMP_INT(config.numlockon, 0, 1);
 
 	// 触控板设置
+	disable_trackpad = CLAMP_INT(config.disable_trackpad, 0, 1);
 	tap_to_click = CLAMP_INT(config.tap_to_click, 0, 1);
 	tap_and_drag = CLAMP_INT(config.tap_and_drag, 0, 1);
 	drag_lock = CLAMP_INT(config.drag_lock, 0, 1);
@@ -2267,6 +2304,7 @@ void set_value_default() {
 	config.animation_fade_out = animation_fade_out; // Enable animation fade out
 	config.tag_animation_direction = tag_animation_direction; // 标签动画方向
 	config.zoom_initial_ratio = zoom_initial_ratio; // 动画起始窗口比例
+	config.zoom_end_ratio = zoom_end_ratio;			// 动画结束窗口比例
 	config.fadein_begin_opacity =
 		fadein_begin_opacity; // Begin opac window ratio for animations
 	config.fadeout_begin_opacity = fadeout_begin_opacity;
@@ -2340,6 +2378,7 @@ void set_value_default() {
 	config.repeat_delay = repeat_delay;
 
 	/* Trackpad */
+	config.disable_trackpad = disable_trackpad;
 	config.tap_to_click = tap_to_click;
 	config.tap_and_drag = tap_and_drag;
 	config.drag_lock = drag_lock;

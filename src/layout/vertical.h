@@ -6,10 +6,10 @@ void vertical_fibonacci(Monitor *mon, int s) {
 	unsigned int cur_gappoh = enablegaps ? mon->gappoh : 0;
 	unsigned int cur_gappov = enablegaps ? mon->gappov : 0;
 
-	cur_gappih = smartgaps && mon->visible_clients == 1 ? 0 : cur_gappih;
-	cur_gappiv = smartgaps && mon->visible_clients == 1 ? 0 : cur_gappiv;
-	cur_gappoh = smartgaps && mon->visible_clients == 1 ? 0 : cur_gappoh;
-	cur_gappov = smartgaps && mon->visible_clients == 1 ? 0 : cur_gappov;
+	cur_gappih = smartgaps && mon->visible_tiling_clients == 1 ? 0 : cur_gappih;
+	cur_gappiv = smartgaps && mon->visible_tiling_clients == 1 ? 0 : cur_gappiv;
+	cur_gappoh = smartgaps && mon->visible_tiling_clients == 1 ? 0 : cur_gappoh;
+	cur_gappov = smartgaps && mon->visible_tiling_clients == 1 ? 0 : cur_gappov;
 	// Count visible clients
 	wl_list_for_each(c, &clients, link) if (VISIBLEON(c, mon) && ISTILED(c))
 		n++;
@@ -28,7 +28,8 @@ void vertical_fibonacci(Monitor *mon, int s) {
 		if (!VISIBLEON(c, mon) || !ISTILED(c))
 			continue;
 
-		c->bw = mon->visible_clients == 1 && no_border_when_single && smartgaps
+		c->bw = mon->visible_tiling_clients == 1 && no_border_when_single &&
+						smartgaps
 					? 0
 					: borderpx;
 		if ((i % 2 && nw / 2 > 2 * c->bw) || (!(i % 2) && nh / 2 > 2 * c->bw)) {
@@ -144,10 +145,10 @@ void vertical_grid(Monitor *m) {
 
 	if (n == 1) {
 		wl_list_for_each(c, &clients, link) {
-			c->bw =
-				m->visible_clients == 1 && no_border_when_single && smartgaps
-					? 0
-					: borderpx;
+			c->bw = m->visible_tiling_clients == 1 && no_border_when_single &&
+							smartgaps
+						? 0
+						: borderpx;
 			if (VISIBLEON(c, m) && !c->isunglobal &&
 				((m->isoverview && !client_should_ignore_focus(c)) ||
 				 ISTILED(c))) {
@@ -168,10 +169,10 @@ void vertical_grid(Monitor *m) {
 		cw = (m->w.width - 2 * overviewgappo) * 0.65;
 		i = 0;
 		wl_list_for_each(c, &clients, link) {
-			c->bw =
-				m->visible_clients == 1 && no_border_when_single && smartgaps
-					? 0
-					: borderpx;
+			c->bw = m->visible_tiling_clients == 1 && no_border_when_single &&
+							smartgaps
+						? 0
+						: borderpx;
 			if (VISIBLEON(c, m) && !c->isunglobal &&
 				((m->isoverview && !client_should_ignore_focus(c)) ||
 				 ISTILED(c))) {
@@ -213,9 +214,10 @@ void vertical_grid(Monitor *m) {
 
 	i = 0;
 	wl_list_for_each(c, &clients, link) {
-		c->bw = m->visible_clients == 1 && no_border_when_single && smartgaps
-					? 0
-					: borderpx;
+		c->bw =
+			m->visible_tiling_clients == 1 && no_border_when_single && smartgaps
+				? 0
+				: borderpx;
 		if (VISIBLEON(c, m) && !c->isunglobal &&
 			((m->isoverview && !client_should_ignore_focus(c)) || ISTILED(c))) {
 			cx = m->w.x + (i / rows) * (cw + overviewgappi);
@@ -237,15 +239,13 @@ void vertical_deck(Monitor *m) {
 	unsigned int mh, mx;
 	int i, n = 0;
 	Client *c;
-	unsigned int cur_gappih = enablegaps ? m->gappih : 0;
 	unsigned int cur_gappiv = enablegaps ? m->gappiv : 0;
 	unsigned int cur_gappoh = enablegaps ? m->gappoh : 0;
 	unsigned int cur_gappov = enablegaps ? m->gappov : 0;
 
-	cur_gappih = smartgaps && m->visible_clients == 1 ? 0 : cur_gappih;
-	cur_gappiv = smartgaps && m->visible_clients == 1 ? 0 : cur_gappiv;
-	cur_gappoh = smartgaps && m->visible_clients == 1 ? 0 : cur_gappoh;
-	cur_gappov = smartgaps && m->visible_clients == 1 ? 0 : cur_gappov;
+	cur_gappiv = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappiv;
+	cur_gappoh = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappoh;
+	cur_gappov = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappov;
 
 	wl_list_for_each(c, &clients, link) if (VISIBLEON(c, m) && ISTILED(c)) n++;
 	if (n == 0)
@@ -263,15 +263,15 @@ void vertical_deck(Monitor *m) {
 		if (!VISIBLEON(c, m) || !ISTILED(c))
 			continue;
 		if (i < m->nmaster) {
-			resize(c,
-				   (struct wlr_box){
-					   .x = m->w.x + cur_gappoh + mx,
-					   .y = m->w.y + cur_gappov,
-					   .width = (m->w.width - cur_gappoh - mx - cur_gappih) /
-								(MIN(n, m->nmaster) - i),
-					   .height = mh},
-				   0);
-			mx += c->geom.width + cur_gappih;
+			resize(
+				c,
+				(struct wlr_box){.x = m->w.x + cur_gappoh + mx,
+								 .y = m->w.y + cur_gappov,
+								 .width = (m->w.width - 2 * cur_gappoh - mx) /
+										  (MIN(n, m->nmaster) - i),
+								 .height = mh},
+				0);
+			mx += c->geom.width;
 		} else {
 			resize(c,
 				   (struct wlr_box){.x = m->w.x + cur_gappoh,
@@ -299,9 +299,9 @@ void vertical_scroller(Monitor *m) {
 	unsigned int cur_gappov = enablegaps ? m->gappov : 0;
 	unsigned int cur_gappoh = enablegaps ? m->gappoh : 0;
 
-	cur_gappiv = smartgaps && m->visible_clients == 1 ? 0 : cur_gappiv;
-	cur_gappov = smartgaps && m->visible_clients == 1 ? 0 : cur_gappov;
-	cur_gappoh = smartgaps && m->visible_clients == 1 ? 0 : cur_gappoh;
+	cur_gappiv = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappiv;
+	cur_gappov = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappov;
+	cur_gappoh = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappoh;
 
 	unsigned int max_client_height =
 		m->w.height - 2 * scroller_structs - cur_gappiv;
@@ -360,7 +360,7 @@ void vertical_scroller(Monitor *m) {
 	for (i = 0; i < n; i++) {
 		c = tempClients[i];
 		if (root_client == c) {
-			if (!c->is_open_animation &&
+			if (!c->is_pending_open_animation &&
 				c->geom.y >= m->w.y + scroller_structs &&
 				c->geom.y + c->geom.height <=
 					m->w.y + m->w.height - scroller_structs) {
@@ -427,49 +427,49 @@ void vertical_tile(Monitor *m) {
 	if (n == 0)
 		return;
 
-	unsigned int cur_gappih = enablegaps ? m->gappih : 0;
 	unsigned int cur_gappiv = enablegaps ? m->gappiv : 0;
-	unsigned int cur_gappoh = enablegaps ? m->gappoh : 0;
+	unsigned int cur_gappih = enablegaps ? m->gappih : 0;
 	unsigned int cur_gappov = enablegaps ? m->gappov : 0;
+	unsigned int cur_gappoh = enablegaps ? m->gappoh : 0;
 
-	cur_gappih = smartgaps && m->visible_clients == 1 ? 0 : cur_gappih;
-	cur_gappiv = smartgaps && m->visible_clients == 1 ? 0 : cur_gappiv;
-	cur_gappoh = smartgaps && m->visible_clients == 1 ? 0 : cur_gappoh;
-	cur_gappov = smartgaps && m->visible_clients == 1 ? 0 : cur_gappov;
+	cur_gappiv = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappiv;
+	cur_gappih = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappih;
+	cur_gappov = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappov;
+	cur_gappoh = smartgaps && m->visible_tiling_clients == 1 ? 0 : cur_gappoh;
 
 	if (n > selmon->pertag->nmasters[selmon->pertag->curtag])
 		mh = selmon->pertag->nmasters[selmon->pertag->curtag]
-				 ? (m->w.height + cur_gappih * ie) *
+				 ? (m->w.height + cur_gappiv * ie) *
 					   selmon->pertag->mfacts[selmon->pertag->curtag]
 				 : 0;
 	else
-		mh = m->w.height - 2 * cur_gappov + cur_gappih * ie;
+		mh = m->w.height - 2 * cur_gappoh + cur_gappiv * ie;
 	i = 0;
-	mx = tx = cur_gappoh;
+	mx = tx = cur_gappov;
 	wl_list_for_each(c, &clients, link) {
 		if (!VISIBLEON(c, m) || !ISTILED(c))
 			continue;
 		if (i < selmon->pertag->nmasters[selmon->pertag->curtag]) {
 			r = MIN(n, selmon->pertag->nmasters[selmon->pertag->curtag]) - i;
-			w = (m->w.width - mx - cur_gappoh - cur_gappih * ie * (r - 1)) / r;
+			w = (m->w.width - mx - cur_gappov - cur_gappiv * ie * (r - 1)) / r;
 			resize(c,
 				   (struct wlr_box){.x = m->w.x + mx,
-									.y = m->w.y + cur_gappov,
+									.y = m->w.y + cur_gappoh,
 									.width = w,
-									.height = mh - cur_gappiv * ie},
+									.height = mh - cur_gappih * ie},
 				   0);
-			mx += c->geom.width + cur_gappih * ie;
+			mx += c->geom.width + cur_gappiv * ie;
 		} else {
 			r = n - i;
-			w = (m->w.width - tx - cur_gappoh - cur_gappih * ie * (r - 1)) / r;
+			w = (m->w.width - tx - cur_gappov - cur_gappiv * ie * (r - 1)) / r;
 			resize(
 				c,
 				(struct wlr_box){.x = m->w.x + tx,
-								 .y = m->w.y + mh + cur_gappov,
+								 .y = m->w.y + mh + cur_gappoh,
 								 .width = w,
-								 .height = m->w.height - mh - 2 * cur_gappov},
+								 .height = m->w.height - mh - 2 * cur_gappoh},
 				0);
-			tx += c->geom.width + cur_gappih * ie;
+			tx += c->geom.width + cur_gappiv * ie;
 		}
 		i++;
 	}

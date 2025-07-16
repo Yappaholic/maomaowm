@@ -34,6 +34,11 @@ Scroller Layout
 
 https://github.com/user-attachments/assets/c9bf9415-fad1-4400-bcdc-3ad2d76de85a
 
+Layer animaiton
+
+https://github.com/user-attachments/assets/014c893f-115c-4ae9-8342-f9ae3e9a0df0
+
+
 # Supported layouts
 
 - Tile
@@ -71,6 +76,28 @@ yay -S maomaowm-git
 
 ```
 
+## Gentoo Linux
+
+The package is in the community-maintained repository called GURU.
+First, add GURU repository:
+
+```bash
+emerge --ask --verbose eselect-repository
+eselect repository enable guru
+emerge --sync guru
+```
+
+Then, add `gui-libs/scenefx` and `gui-wm/maomaowm` to the `package.accept_keywords`.
+
+Finally, install the package:
+
+```bash
+emerge --ask --verbose gui-wm/maomaowm
+```
+
+Patching wlroots is done by getting the patch with git from [the repository](https://github.com/DreamMaoMao/wlroots.git)
+and then copying it to `/etc/portage/patches/gui-libs/wlroots/`.
+
 ## Other
 
 ```bash
@@ -93,11 +120,11 @@ sudo ninja -C build install
 
 ## Suggested Tools
 
-- Application launcher (wofi, bemenu, wmenu, fuzzel)
+- Application launcher (rofi-wayland, bemenu, wmenu, fuzzel)
 - Terminal emulator (foot, wezterm, alacritty, kitty, ghostty)
 - Status bar (waybar, eww, quickshell, ags), waybar is preferred
 - Wallpaper setup (swww, swaybg)
-- Notification daemon (swaync, dunst)
+- Notification daemon (swaync, dunst,mako)
 - Desktop portal (xdg-desktop-portal, xdg-desktop-portal-wlr, xdg-desktop-portal-gtk)
 - Clipboard (wl-clipboard, wl-clip-persist, cliphist)
 - Gamma control/night light (wlsunset, gammastep)
